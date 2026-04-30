@@ -1,0 +1,71 @@
+SOFTWARE ENGINEER
+
+Sophic Automation Sdn Bhd 
+
+Bayan Lepas, Penang
+Developers/Programmers (Information & Communication Technology)
+Full time
+RM 3,500 – RM 4,000 per month
+⁠
+JOB DESCRIPTION
+
+Explore new technologies/open source to implement Virtual Machine in engineering environment.
+
+Automate engineering test instrument.
+
+Perform hands-on software development, write code and unit tests, do proof of concepts, conduct code reviews, and perform testing.
+
+Develop and test software development methodology in an agile environment.
+
+Develop the RESTful API.
+
+Work with outside data sources and APIs.
+
+Troubleshoot problems and improving application performance.
+
+Integrate applications with network systems, servers and databases.
+
+Works closely with the Architects and the development teams.
+
+Designing, coding, testing, documenting, and deploying global applications based on system and user requirements and experience building customer facing applications deployed on cloud environments (AWS, Azure or similar) and knowledge of Agile methodology.
+
+Optimize codes for high volume transaction.
+
+Implement new technologies to maximize application performance.
+
+Familiar with Unit Test, Mock, Test Driven Development and analyze and resolve performance issues in all environments.
+
+
+
+JOB REQUIREMENT
+
+Understanding service-oriented architecture (for example REST APIs, micro-services, etc) and API implementation.
+
+Database development and design with MS-SQL.
+
+Scripting skills and object-oriented programming concepts (for example bash, Python/Perl, Javascript, Angular 2.0, .NET and up)
+
+Knowledge of source code repositories (for example Git, GitHub)
+
+Understanding of Java web application technology stack (core Java, spring core, Spring MVC, Hibernate, REST)
+
+Understanding of middleware and messaging concepts a plus.
+
+End-user GUI design.
+
+Understand source code management best practices.
+
+Business Intelligence skills (for example: SSIS, MSRS, ETL Processes, Tabular Models, PowerPoint, SharePoint) – as a strong plus.
+
+Understanding of a microservices concept – as a strong plus.
+
+Experience and knowledge of Linux/UNIX basics, CLI – as a strong plus.
+
+Awareness of the modern Virtualization technologies (experience deploying and managing virtual machines on VMware ESXi / Microsoft Hyper-V clusters/Kernel VM) – as a strong plus.
+
+Expert knowledge in analyzing, designing, and developing solutions to highly complex problems.
+
+Like to brainstorm for better solutions.
+
+At least 2 years of coding experience.
+

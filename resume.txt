@@ -1,0 +1,106 @@
+DEVESHWER NAGANTHIRAN
+BACHELOR OF COMPUTER SCIENCE (AI) (HONS)
++60 11 70298779 | deveshwer06@gmail.com
+
+================================================================================
+PROFESSIONAL EXPERIENCE
+================================================================================
+
+Motorola Solutions (via Mindteck) | Penang, Malaysia
+Software Automation Test Engineer
+01/2026 - Present
+• Developed an automated font and string verification system for radio dot-matrix screens.
+• Engineered a Python-based automation framework utilizing OpenCV (YOLO) and EasyOCR to detect, crop, and verify multilingual text on radio LCD screens, significantly reducing manual QA testing time.
+• Integrated Motorola's enterprise GenAI Gateway (using ChatGPT-4O and Gemini) for complex OCR validation, successfully optimizing Base64 image payload sizes to reduce cloud API token costs by over 90%.
+• Developed a custom "Burst Capture" algorithm to track and verify dynamic scrolling text in real-time, bypassing the need for expensive cloud processing and complex image-stitching.
+• Implemented automated data normalization and "hardware illusion dictionaries" to resolve edge cases like Unicode conflicts (Cyrillic vs. Latin) and pixel gaps, drastically reducing false-positive failure rates.
+
+Robert Bosch | Penang, Malaysia
+Web-based Production UI Developer (Intern)
+10/2024 - 03/2025
+• Led the development of a responsive UI platform using Vue.js 3 and TypeScript to replace Excel-based workflows, improving process efficiency by 30%.
+• Integrated CI/CD pipelines for automated deployment, minimizing downtime and speeding up updates.
+• Developed unit tests using Testing Library, ensuring code quality and reducing bugs.
+• Collaborated with cross-functional teams in an Agile environment, resulting in faster time-to-market for production systems.
+
+TalentCorp Malaysia | Remote
+Participant - Full Stack .NET Development
+08/2025 - 11/2025
+• Completed intensive training in ASP.NET Core, EF Core, SQL Server, and web development.
+• Developed Trainee Management System with secure authentication, email integration, and responsive UI using Bootstrap.
+
+UTeM | Melaka, Malaysia
+MorseCode Communication App Developer (Final Year Project)
+10/2023 - 10/2024
+• Designed and developed an Android app for deafblind users to communicate through Morse code.
+• Improved user interaction speed by 25% through a Flutter-based frontend and integrated Firebase for real-time messaging.
+• Implemented accessible UI/UX using gesture and vibration patterns, focusing on usability for assistive technology users.
+• Successfully presented the app at university tech exhibitions, receiving positive feedback from the academic community.
+
+================================================================================
+EDUCATION
+================================================================================
+
+Universiti Teknikal Malaysia Melaka | Melaka, Malaysia
+Bachelor in Computer Science (AI) - 3.5
+01/2020 - 03/2025
+
+Kolej Matrikulasi Pulau Pinang | Penang, Malaysia
+Malaysian Matriculation Certificate - 3.8
+01/2019 - 12/2020
+
+S.M.K Hamid Khan | Penang, Malaysia
+SPM Certificate
+01/2014 - 12/2018
+
+================================================================================
+TECHNICAL SKILLS
+================================================================================
+• Programming Languages: Python, JavaScript, Java, Dart, TypeScript, Golang
+• Web Development: HTML, CSS, Vue.js, Flutter, Firebase, AWS, GCP, Docker
+• AI/ML: TensorFlow, Keras, PyTorch, NLP, Deep Learning, Reinforcement Learning
+• Database: SQL, Firebase Realtime Database, NoSQL
+• Tools & Technologies: Git, Docker, CI/CD, Linux, Kubernetes, Firebase
+• Methodologies: Agile, Scrum, Test-Driven Development (TDD), Continuous Integration
+
+================================================================================
+PROJECTS
+================================================================================
+Smart Home Automation System & ML Classifier
+• Developed a machine learning model using TensorFlow and NLP to classify emails as spam or legitimate, achieving 95% accuracy.
+• Integrated the classifier with a web interface for real-time email filtering.
+• Built a cloud-based system using Google Firebase for real-time synchronization and control of IoT devices like temperature sensors and motion detectors.
+• Utilized AWS Lambda for serverless functions, ensuring scalability and cost-effectiveness.
+
+================================================================================
+SUBJECT EXPERTISE
+================================================================================
+• Artificial Intelligence (AI): Deep understanding of AI, including AI in robotics and automation, as well as project management.
+• Machine Learning & Data Science: Expertise in machine learning algorithms, image processing, and NLP, with practical experience in statistics and probability.
+• Software Development & Programming: Proficient in software engineering practices, object-oriented programming, mobile app development, and web applications.
+• Cloud Computing & Security: Strong foundation in cloud computing concepts and information security, including hands-on experience with cloud platforms.
+• Human-Computer Interaction: Focused on creating user-centered designs to enhance the interaction between users and technology.
+• Ethics & Critical Thinking: Developed a solid foundation in ethical decision-making and creative problem-solving.
+
+================================================================================
+CERTIFICATIONS
+================================================================================
+• Google Cloud Certification | Google | 2024
+• AWS Certified Developer - Associate | Amazon Web Services | 2023
+• Microsoft Certified: Azure Fundamentals | Microsoft | 2023
+
+================================================================================
+AWARDS AND RECOGNITION
+================================================================================
+• Dean's List | Universiti Teknikal Malaysia Melaka | 2022 - 2024
+
+================================================================================
+SOFT SKILLS
+================================================================================
+• Strong communicator (technical and non-technical)
+• Creative problem-solving and critical thinking
+• Collaborative team player with leadership experience
+• Quick learner, adaptable in fast-paced environments
+• Attention to detail, with a strong focus on user experience design
+Deveshwer_Naganthiran_Resume.txt
+Displaying Deveshwer_Naganthiran_Resume.txt.
