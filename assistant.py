@@ -8,19 +8,19 @@ import json
 from pathlib import Path
 from io import BytesIO
 
-
 import cv2
 import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
 import requests
-from PIL import Image
+from PIL import Image, ImageTk
 from dotenv import load_dotenv
 
+import tkinter as tk
+from tkinter import scrolledtext
 
 # Load environment variables
 load_dotenv()
-
 
 # ----------------------------------------------------------------------
 # Configuration
@@ -31,20 +31,16 @@ MSI_MODEL = os.getenv("MSI_MODEL")
 MSI_USER_ID = os.getenv("MSI_USER_ID")
 MSI_DATASTORE_ID = os.getenv("MSI_DATASTORE_ID")
 
-
 RESUME_PATH = "resume.txt"
 JOB_DESC_PATH = "job_description.txt"
 
-
 # Webcam indices (adjust to your setup)
 CAMERA_PAPER = 0   # webcam aimed at the problem sheet
-CAMERA_FACE   = None   # webcam for your face (optional, can be None)
-
+CAMERA_FACE = None # webcam for your face (optional, can be None)
 
 AUDIO_SAMPLERATE = 16000
 AUDIO_CHANNELS = 1
 RECORD_FILENAME = "last_question.wav"
-
 
 # ----------------------------------------------------------------------
 # Load static context
@@ -56,25 +52,18 @@ def load_text(path):
     except Exception:
         return ""
 
-
 RESUME = load_text(RESUME_PATH)
 JOB_DESC = load_text(JOB_DESC_PATH)
-
 
 if not RESUME:
     print("WARNING: resume.txt is empty or missing.")
 if not JOB_DESC:
     print("WARNING: job_description.txt is empty or missing.")
 
-
 # ----------------------------------------------------------------------
 # MSI GenAI API client
 # ----------------------------------------------------------------------
 class InterviewAI:
-    """
-    Handles communication with the MSI GenAI service.
-    Supports text-only and image+text messages.
-    """
     def __init__(self):
         self.host = MSI_HOST
         self.api_key = MSI_API_KEY
@@ -86,13 +75,10 @@ class InterviewAI:
             "Authorization": f"Bearer {self.api_key}",
             "X-User-Id": self.user_id,
             "X-Datastore-Id": self.datastore_id,
-            # Add any other required headers your MSI instance expects
         }
         self.system_prompt = self._build_system_prompt()
 
-
     def _build_system_prompt(self) -> str:
-        """Create the main system instruction from resume and JD."""
         parts = [
             "You are an expert interview assistant.",
             "You help the candidate (the user) answer interview questions.",
@@ -111,19 +97,10 @@ class InterviewAI:
         ]
         return "\n".join(parts)
 
-
     def ask(self, question: str, image_bgr = None) -> str:
-        """
-        Send a question (text) plus optional image to the model.
-        Returns the model's answer as a string.
-        """
-        # Build message content list
         content = [{"type": "text", "text": question}]
 
-
-        # If an image is provided, encode it as base64 data URL
         if image_bgr is not None:
-            # Convert BGR (OpenCV) to RGB PIL
             rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(rgb)
             buf = BytesIO()
@@ -134,7 +111,6 @@ class InterviewAI:
                 "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
             })
 
-
         payload = {
             "model": self.model,
             "messages": [
@@ -144,7 +120,6 @@ class InterviewAI:
             "max_tokens": 500,
             "temperature": 0.7,
         }
-
 
         try:
             resp = requests.post(
@@ -161,191 +136,245 @@ class InterviewAI:
         except Exception as e:
             return f"Request failed: {str(e)}"
 
-
 # ----------------------------------------------------------------------
-# Audio recorder (start/stop via threading)
+# Audio recorder
 # ----------------------------------------------------------------------
 class AudioRecorder:
-    """Records audio to a WAV file when activated."""
     def __init__(self, filename=RECORD_FILENAME):
         self.filename = filename
         self.frames = []
         self.recording = False
         self._thread = None
 
-
     def record(self):
-        """Start recording in a background thread."""
-        if self.recording:
-            return
+        if self.recording: return
         self.frames = []
         self.recording = True
         self._thread = threading.Thread(target=self._record_loop)
         self._thread.start()
 
-
     def stop(self):
-        """Stop recording and save the file."""
-        if not self.recording:
-            return
+        if not self.recording: return
         self.recording = False
         if self._thread:
             self._thread.join()
         self._save()
 
-
     def _record_loop(self):
-        """Internal loop that captures audio chunks."""
         def callback(indata, frames, time_info, status):
             if self.recording:
                 self.frames.append(indata.copy())
-
-
         with sd.InputStream(samplerate=AUDIO_SAMPLERATE, channels=AUDIO_CHANNELS,
                             callback=callback, dtype='float32'):
             while self.recording:
                 sd.sleep(100)
 
-
     def _save(self):
-        """Write recorded audio to WAV file."""
-        if not self.frames:
-            print("No audio recorded.")
-            return
+        if not self.frames: return
         audio = np.concatenate(self.frames, axis=0)
-        # Convert float32 [-1, 1] to int16
         audio_int16 = np.int16(audio * 32767)
         with wave.open(self.filename, 'wb') as wf:
             wf.setnchannels(AUDIO_CHANNELS)
-            wf.setsampwidth(2)  # 16-bit
+            wf.setsampwidth(2)
             wf.setframerate(AUDIO_SAMPLERATE)
             wf.writeframes(audio_int16.tobytes())
-        print(f"Audio saved to {self.filename}")
-
 
 # ----------------------------------------------------------------------
-# Speech‑to‑text using Google Web Speech (free, requires internet)
+# Speech‑to‑text
 # ----------------------------------------------------------------------
 def transcribe_audio(filename, language="en-US"):
-    """Transcribe WAV file to text. Returns empty string on failure."""
     recognizer = sr.Recognizer()
     try:
         with sr.AudioFile(filename) as source:
             audio_data = recognizer.record(source)
-        text = recognizer.recognize_google(audio_data, language=language)
-        return text
-    except sr.UnknownValueError:
-        print("Could not understand audio.")
+        return recognizer.recognize_google(audio_data, language=language)
+    except:
         return ""
-    except sr.RequestError as e:
-        print(f"Speech service error: {e}")
-        return ""
-    except Exception as e:
-        print(f"Transcription error: {e}")
-        return ""
-
 
 # ----------------------------------------------------------------------
-# Main application
+# GUI Application Main Class
+# ----------------------------------------------------------------------
+class InterviewAssistantApp:
+    def __init__(self, root, ai, recorder, cap_paper, cap_face):
+        self.root = root
+        self.root.title("Interview Assistant Dashboard")
+        self.root.geometry("1100x650")
+        
+        self.ai = ai
+        self.recorder = recorder
+        self.cap_paper = cap_paper
+        self.cap_face = cap_face
+
+        self.recording_mode = None  # 'r' or 'c'
+        self.last_paper_frame = None
+
+        self.setup_ui()
+        self.update_video()
+
+        # Keyboard bindings (Requires window to be in focus)
+        self.root.bind('<r>', self.toggle_audio_record)
+        self.root.bind('<c>', self.toggle_capture_record)
+        self.root.bind('<q>', self.on_closing)
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def setup_ui(self):
+        # Left Panel (Video Feeds)
+        self.video_frame = tk.Frame(self.root, bg="#2b2b2b")
+        self.video_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+
+        self.paper_label = tk.Label(self.video_frame, text="Problem / Paper Camera", fg="white", bg="#2b2b2b", font=("Arial", 12, "bold"))
+        self.paper_label.pack(pady=5)
+        
+        self.paper_vid_lbl = tk.Label(self.video_frame, bg="black")
+        self.paper_vid_lbl.pack()
+
+        if self.cap_face and self.cap_face.isOpened():
+            self.face_label = tk.Label(self.video_frame, text="Your Face", fg="white", bg="#2b2b2b", font=("Arial", 12, "bold"))
+            self.face_label.pack(pady=10)
+            self.face_vid_lbl = tk.Label(self.video_frame, bg="black")
+            self.face_vid_lbl.pack()
+
+        # Right Panel (Chat / Output)
+        self.text_frame = tk.Frame(self.root)
+        self.text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Status Bar
+        self.status_lbl = tk.Label(
+            self.text_frame, 
+            text="🟢 READY | Press 'r' to record audio | Press 'c' to record audio + capture screen", 
+            fg="green", font=("Arial", 12, "bold")
+        )
+        self.status_lbl.pack(pady=5)
+
+        # Scrolling Text Display
+        self.chat_display = scrolledtext.ScrolledText(self.text_frame, wrap=tk.WORD, font=("Consolas", 11), state=tk.DISABLED)
+        self.chat_display.pack(fill=tk.BOTH, expand=True)
+        
+        self.chat_display.tag_config('interviewer', foreground='#00008B', font=("Consolas", 12, "bold"))
+        self.chat_display.tag_config('ai', foreground='#006400', font=("Consolas", 12))
+        self.chat_display.tag_config('system', foreground='gray')
+
+    def log_chat(self, speaker, text, tag):
+        """Helper to append text to the GUI chat window safely"""
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.insert(tk.END, f"[{speaker}]\n", tag)
+        self.chat_display.insert(tk.END, f"{text}\n\n", tag)
+        self.chat_display.see(tk.END)
+        self.chat_display.config(state=tk.DISABLED)
+
+    def update_video(self):
+        """Loop that continually grabs frames from OpenCV and puts them in Tkinter"""
+        ret, frame = self.cap_paper.read()
+        if ret:
+            self.last_paper_frame = frame.copy()
+            # Resize for UI
+            frame_resized = cv2.resize(frame, (480, 360))
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.paper_vid_lbl.imgtk = imgtk
+            self.paper_vid_lbl.configure(image=imgtk)
+
+        if self.cap_face and self.cap_face.isOpened():
+            ret_f, frame_f = self.cap_face.read()
+            if ret_f:
+                frame_f_resized = cv2.resize(frame_f, (320, 240))
+                frame_f_rgb = cv2.cvtColor(frame_f_resized, cv2.COLOR_BGR2RGB)
+                img_f = Image.fromarray(frame_f_rgb)
+                imgtk_f = ImageTk.PhotoImage(image=img_f)
+                self.face_vid_lbl.imgtk = imgtk_f
+                self.face_vid_lbl.configure(image=imgtk_f)
+
+        # Call this function again in 30ms
+        self.root.after(30, self.update_video)
+
+    def toggle_audio_record(self, event=None):
+        if self.recording_mode == 'c': return # Prevent overlapping commands
+
+        if self.recording_mode is None:
+            self.recording_mode = 'r'
+            self.recorder.record()
+            self.status_lbl.config(text="🔴 RECORDING AUDIO... Press 'r' again to stop and send.", fg="red")
+        
+        elif self.recording_mode == 'r':
+            self.status_lbl.config(text="⏳ Processing Transcription & AI Response...", fg="orange")
+            self.recorder.stop()
+            self.recording_mode = None
+            threading.Thread(target=self.process_audio_only, daemon=True).start()
+
+    def toggle_capture_record(self, event=None):
+        if self.recording_mode == 'r': return 
+
+        if self.recording_mode is None:
+            self.recording_mode = 'c'
+            self.recorder.record()
+            self.status_lbl.config(text="🔴 RECORDING AUDIO + CAPTURE... Press 'c' again to send.", fg="red")
+            
+        elif self.recording_mode == 'c':
+            self.status_lbl.config(text="⏳ Processing Image, Transcription & AI Response...", fg="orange")
+            self.recorder.stop()
+            self.recording_mode = None
+            
+            captured_frame = self.last_paper_frame.copy() if self.last_paper_frame is not None else None
+            threading.Thread(target=self.process_audio_and_capture, args=(captured_frame,), daemon=True).start()
+
+    def process_audio_only(self):
+        question_text = transcribe_audio(RECORD_FILENAME)
+        if question_text:
+            self.root.after(0, self.log_chat, "Interviewer", question_text, 'interviewer')
+            answer = self.ai.ask(question_text)
+            self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
+        else:
+            self.root.after(0, self.log_chat, "System", "No speech detected. Please try again.", 'system')
+            
+        self.root.after(0, lambda: self.status_lbl.config(text="🟢 READY | Press 'r' (audio) | 'c' (audio + capture)", fg="green"))
+
+    def process_audio_and_capture(self, frame):
+        question_text = transcribe_audio(RECORD_FILENAME)
+        
+        if question_text:
+            prompt = f"The interviewer asked this question: '{question_text}'. Please look at the provided image and answer accordingly."
+            display_text = f"📷 (Image Attached) + \"{question_text}\""
+        else:
+            prompt = "The image shows a problem I need to solve. Please read it and provide a solution."
+            display_text = "📷 (Image Attached) - [No verbal question detected]"
+
+        self.root.after(0, self.log_chat, "Interviewer", display_text, 'interviewer')
+        answer = self.ai.ask(prompt, image_bgr=frame)
+        self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
+        
+        self.root.after(0, lambda: self.status_lbl.config(text="🟢 READY | Press 'r' (audio) | 'c' (audio + capture)", fg="green"))
+
+    def on_closing(self, event=None):
+        """Cleanup cameras and gracefully exit"""
+        print("Shutting down...")
+        self.cap_paper.release()
+        if self.cap_face:
+            self.cap_face.release()
+        self.root.quit()
+
+# ----------------------------------------------------------------------
+# Bootstrapper
 # ----------------------------------------------------------------------
 def main():
-    print("=" * 60)
-    print("INTERVIEW ASSISTANT")
-    print("Press 'r' to start/stop recording a question")
-    print("Press 'c' to capture the paper/screen (no voice)")
-    print("Press 'q' to quit")
-    print("=" * 60)
-
-
-    # Initialize components
     ai = InterviewAI()
     recorder = AudioRecorder()
 
-
-    # Open webcams
     cap_paper = cv2.VideoCapture(CAMERA_PAPER, cv2.CAP_DSHOW)
     cap_face = None
     if CAMERA_FACE is not None and CAMERA_FACE >= 0:
         cap_face = cv2.VideoCapture(CAMERA_FACE, cv2.CAP_DSHOW)
 
-
     if not cap_paper.isOpened():
-        print("Could not open paper camera.")
+        print("Could not open paper camera. Check your CAMERA_PAPER index.")
         sys.exit(1)
 
-
-    # State
-    recording = False
-    last_paper_frame = None
-
-
-    try:
-        while True:
-            # Read paper camera (always)
-            ret_paper, frame_paper = cap_paper.read()
-            if not ret_paper:
-                print("Paper camera lost.")
-                break
-            last_paper_frame = frame_paper.copy()
-
-
-            # Show paper camera window
-            cv2.imshow("Paper / Problem View", frame_paper)
-
-
-            # Show face camera if available
-            if cap_face and cap_face.isOpened():
-                ret_face, frame_face = cap_face.read()
-                if ret_face:
-                    cv2.imshow("Your Face", frame_face)
-
-
-            key = cv2.waitKey(1) & 0xFF
-
-
-            # ---- Recording toggle ----
-            if key == ord('r'):
-                if not recording:
-                    recording = True
-                    recorder.record()
-                    print("[REC] Recording started... Press 'r' again to stop.")
-                else:
-                    recording = False
-                    recorder.stop()
-                    print("[REC] Recording stopped.")
-
-
-                    # Transcribe the recorded question
-                    question_text = transcribe_audio(RECORD_FILENAME)
-                    if question_text:
-                        print(f"[Q] {question_text}")
-                        # Ask the AI (no image)
-                        answer = ai.ask(question_text)
-                        print(f"[A] {answer}\n")
-                    else:
-                        print("No question detected. Try again.")
-
-
-            # ---- Capture paper / screen (no voice) ----
-            if key == ord('c'):
-                print("[CAP] Capturing problem from camera...")
-                question = "The image shows a problem I need to solve. Please read it and provide a solution."
-                answer = ai.ask(question, image_bgr=last_paper_frame)
-                print(f"[A] {answer}\n")
-
-
-            # Quit
-            if key == ord('q'):
-                break
-
-
-    finally:
-        cap_paper.release()
-        if cap_face:
-            cap_face.release()
-        cv2.destroyAllWindows()
-        print("Assistant closed.")
-
+    root = tk.Tk()
+    app = InterviewAssistantApp(root, ai, recorder, cap_paper, cap_face)
+    
+    # Start the GUI Loop
+    root.mainloop()
 
 if __name__ == "__main__":
     main()
