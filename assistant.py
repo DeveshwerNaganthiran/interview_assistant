@@ -5,6 +5,8 @@ import base64
 import wave
 import threading
 import json
+import platform
+import ctypes
 from pathlib import Path
 from io import BytesIO
 
@@ -197,8 +199,23 @@ def transcribe_audio(filename, language="en-US"):
 class InterviewAssistantApp:
     def __init__(self, root, ai, recorder, cap_paper, cap_face):
         self.root = root
-        self.root.title("Interview Assistant Dashboard")
+        
+        # 1. Disguise the window title so it looks like a normal background process
+        self.root.title("Windows Input Experience")
         self.root.geometry("1100x650")
+        
+        # 2. Keep the window always on top so you never lose it behind your browser
+        self.root.wm_attributes("-topmost", True)
+
+        # 3. Make the window invisible to screen sharing (Windows 10/11 only)
+        if platform.system() == "Windows":
+            try:
+                # Get the window handle (HWND)
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                # 17 (0x11) is WDA_EXCLUDEFROMCAPTURE: Completely hides the window from screen capture tools
+                ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 17)
+            except Exception as e:
+                print(f"Could not enable stealth mode: {e}")
         
         self.ai = ai
         self.recorder = recorder
@@ -219,33 +236,35 @@ class InterviewAssistantApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def setup_ui(self):
-        # Left Panel (Video Feeds)
+        # Left Panel (Video Feeds) - Anchored to the top
         self.video_frame = tk.Frame(self.root, bg="#2b2b2b")
-        self.video_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        self.video_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=10, pady=10)
 
         self.paper_label = tk.Label(self.video_frame, text="Problem / Paper Camera", fg="white", bg="#2b2b2b", font=("Arial", 12, "bold"))
-        self.paper_label.pack(pady=5)
+        self.paper_label.pack(pady=(10, 5), anchor=tk.N)
         
         self.paper_vid_lbl = tk.Label(self.video_frame, bg="black")
-        self.paper_vid_lbl.pack()
+        self.paper_vid_lbl.pack(anchor=tk.N)
 
         if self.cap_face and self.cap_face.isOpened():
             self.face_label = tk.Label(self.video_frame, text="Your Face", fg="white", bg="#2b2b2b", font=("Arial", 12, "bold"))
-            self.face_label.pack(pady=10)
+            self.face_label.pack(pady=(20, 5), anchor=tk.N)
             self.face_vid_lbl = tk.Label(self.video_frame, bg="black")
-            self.face_vid_lbl.pack()
+            self.face_vid_lbl.pack(anchor=tk.N)
 
         # Right Panel (Chat / Output)
         self.text_frame = tk.Frame(self.root)
         self.text_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Status Bar
+        # Status Bar - Added wraplength and \n to prevent cutoff!
         self.status_lbl = tk.Label(
             self.text_frame, 
-            text="🟢 READY | Press 'r' to record audio | Press 'c' to record audio + capture screen", 
-            fg="green", font=("Arial", 12, "bold")
+            text="🟢 READY\nPress 'r' (Record Audio) | Press 'c' (Record Audio + Capture Screen)", 
+            fg="green", font=("Arial", 12, "bold"),
+            justify=tk.CENTER,
+            wraplength=500 # Forces the text to wrap instead of going off-screen
         )
-        self.status_lbl.pack(pady=5)
+        self.status_lbl.pack(pady=(0, 10))
 
         # Scrolling Text Display
         self.chat_display = scrolledtext.ScrolledText(self.text_frame, wrap=tk.WORD, font=("Consolas", 11), state=tk.DISABLED)
@@ -295,10 +314,10 @@ class InterviewAssistantApp:
         if self.recording_mode is None:
             self.recording_mode = 'r'
             self.recorder.record()
-            self.status_lbl.config(text="🔴 RECORDING AUDIO... Press 'r' again to stop and send.", fg="red")
+            self.status_lbl.config(text="🔴 RECORDING AUDIO...\nPress 'r' again to stop and send.", fg="red")
         
         elif self.recording_mode == 'r':
-            self.status_lbl.config(text="⏳ Processing Transcription & AI Response...", fg="orange")
+            self.status_lbl.config(text="⏳ Processing...\nTranscribing audio & generating AI Response", fg="orange")
             self.recorder.stop()
             self.recording_mode = None
             threading.Thread(target=self.process_audio_only, daemon=True).start()
@@ -309,10 +328,10 @@ class InterviewAssistantApp:
         if self.recording_mode is None:
             self.recording_mode = 'c'
             self.recorder.record()
-            self.status_lbl.config(text="🔴 RECORDING AUDIO + CAPTURE... Press 'c' again to send.", fg="red")
+            self.status_lbl.config(text="🔴 RECORDING AUDIO + CAPTURE...\nPress 'c' again to send.", fg="red")
             
         elif self.recording_mode == 'c':
-            self.status_lbl.config(text="⏳ Processing Image, Transcription & AI Response...", fg="orange")
+            self.status_lbl.config(text="⏳ Processing...\nAnalyzing Image, Transcribing & generating AI Response", fg="orange")
             self.recorder.stop()
             self.recording_mode = None
             
@@ -328,23 +347,23 @@ class InterviewAssistantApp:
         else:
             self.root.after(0, self.log_chat, "System", "No speech detected. Please try again.", 'system')
             
-        self.root.after(0, lambda: self.status_lbl.config(text="🟢 READY | Press 'r' (audio) | 'c' (audio + capture)", fg="green"))
+        self.root.after(0, lambda: self.status_lbl.config(text="🟢 READY\nPress 'r' (Record Audio) | Press 'c' (Record Audio + Capture Screen)", fg="green"))
 
     def process_audio_and_capture(self, frame):
         question_text = transcribe_audio(RECORD_FILENAME)
         
         if question_text:
             prompt = f"The interviewer asked this question: '{question_text}'. Please look at the provided image and answer accordingly."
-            display_text = f"📷 (Image Attached) + \"{question_text}\""
+            display_text = f"📷 (Image Attached)\n\"{question_text}\""
         else:
             prompt = "The image shows a problem I need to solve. Please read it and provide a solution."
-            display_text = "📷 (Image Attached) - [No verbal question detected]"
+            display_text = "📷 (Image Attached)\n[No verbal question detected]"
 
         self.root.after(0, self.log_chat, "Interviewer", display_text, 'interviewer')
         answer = self.ai.ask(prompt, image_bgr=frame)
         self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
         
-        self.root.after(0, lambda: self.status_lbl.config(text="🟢 READY | Press 'r' (audio) | 'c' (audio + capture)", fg="green"))
+        self.root.after(0, lambda: self.status_lbl.config(text="🟢 READY\nPress 'r' (Record Audio) | Press 'c' (Record Audio + Capture Screen)", fg="green"))
 
     def on_closing(self, event=None):
         """Cleanup cameras and gracefully exit"""
