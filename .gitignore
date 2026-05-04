@@ -5,5 +5,7 @@ env/
 
 # Ignore Python cache files
 __pycache__/
+build/
+dist/
 *.pyc
 last_question.wav

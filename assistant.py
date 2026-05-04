@@ -92,6 +92,7 @@ class InterviewAI:
             "model": self.model,
             "datastoreId": self.datastore_id,
             "prompt": "init"
+            
         }
         
         # Increased timeout to 45s for heavy models like Claude
@@ -109,19 +110,23 @@ class InterviewAI:
     def upload_image(self, session_id: str, image_pil) -> bool:
         headers = {"x-msi-genai-api-key": self.api_key}
         image_pil = image_pil.convert('RGB')
+        
+        # Increase max dimension so the code doesn't get shrunk down
         w, h = image_pil.size
-        if max(h, w) > self.max_image_dim:
-            scale = self.max_image_dim / max(h, w)
-            image_pil = image_pil.resize((int(w * scale), int(h * scale)))
+        max_dim = 2048 # Increased from 1024
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            image_pil = image_pil.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
         buf = BytesIO()
-        image_pil.save(buf, format="JPEG", quality=self.jpeg_quality)
+        # USE PNG FOR CODE SCREENSHOTS - NEVER JPEG
+        image_pil.save(buf, format="PNG") 
         image_bytes = buf.getvalue()
         
         url = f"{self.upload_url}/{session_id}?userId={self.user_id}"
-        files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+        # Make sure the mime type is image/png
+        files = {"file": ("image.png", image_bytes, "image/png")} 
         
-        # Increased timeout to 45s
         response = self.http.post(url, headers=headers, files=files, timeout=45)
         
         if response.status_code != 200:
@@ -164,28 +169,29 @@ class InterviewAI:
             # 3. Combine context into a single string with STRICT conversational constraints
             # 3. Combine context into a single string with softer constraints to bypass Azure filters
             full_prompt = (
-                "- CRITICAL: The user is speaking into a microphone. ALWAYS correct phonetic typos in your head before answering.Do not blindly trust the exact text."
+                "- CRITICAL: The user is speaking into a microphone. ALWAYS correct phonetic typos in your head before answering. Do not blindly trust the exact text.\n"
                 "Roleplay Context: You are a candidate in a software engineering job interview. "
-                "Speak naturally out loud to the interviewer. Be confident, casual, and direct. "
+                "Speak naturally out loud to the interviewer, but be highly technical and extremely thorough. "
                 "Please stay in character as a human engineer talking out loud and avoid referencing yourself as an AI.\n\n"
-                "Phrases to Avoid: 'I see several issues', 'Here is how I would correct', 'Let me go through them', 'The code snippet presented', 'This should resolve the errors'.\n\n"
-                "Code Review Instructions: If shown an image of code, do these 2 things in order:\n"
-                "1. Mentally trace the image top-to-bottom, character-by-character. Identify all syntax or runtime errors.\n"
-                "Important Vision Rule: Do not use line numbers (e.g., never say 'On line 4'). Instead, quote the exact code directly.\n"
-                "Important Ordering Rule: Explain the errors in the top-to-bottom chronological order they appear in the image.\n"
+                
+                "Code Review Instructions: If shown an image of code, perform a strict 'RAW OCR TRANSCRIPT' process. It could be ANY programming language (Python, JavaScript, C++, C#, Java, Go, etc.). Do these 3 things in order:\n"
+                
+                "1. RAW TRANSCRIPTION: Before analyzing anything, you MUST mentally transcribe the code exactly as it appears in the image, pixel-by-pixel. Do NOT auto-correct typos. If the image says `f==open`, you must see `f==open`. If the image says `f.rite`, you must see `f.rite`. If the image uses a period instead of a comma, you must see the period.\n"
+                
+                "2. EXHAUSTIVE COMPARISON: Compare your raw transcript against the correct syntax for that specific programming language. Point out EVERY SINGLE error. \n"
                 "Important Vision Checks:\n"
-                "- Check every variable assignment (is it using `==` instead of `=`?).\n"
-                "- Check every function definition (missing `()` or `:`?).\n"
-                "- Check every method call (hyphens `-` used instead of dots `.`).\n"
-                "- Ignore variable misspellings or typos (e.g., 'celcius') as long as the spelling is consistent and won't break the code.\n"
-                "2. Casually point out what is wrong with the specific lines you found. Do not print out the entire corrected code block at the end. Only discuss the specific lines that need fixing.\n\n"
-                "Example Tone (Mimic this conversational style):\n"
-                "- 'Ah, I spot a few bugs here. Going top to bottom: First, when assigning the `name`, `gift`, and `option` variables, you're using double equals `==` which is for comparison, not assignment. Next, down inside the if statement, it says `christmaslist-append` with a hyphen instead of a dot. That's pretty much it!'\n\n"
+                "- Check assignments vs equality operators (e.g. `=` vs `==`).\n"
+                "- Check punctuation separators (e.g. commas `,` vs dots `.`).\n"
+                "- Check for missing line terminators, brackets, or colons based on the language's requirements.\n"
+                
+                "3. FINAL OUTPUT: Casually point out all the specific lines you found that are broken. You MUST quote the exact broken text from your raw transcript. Then, print out the entire, fully corrected code block at the end.\n\n"
+                
                 "If asked a behavioral question, answer naturally in the first person ('I', 'my') using your resume below. Tailor it to the job description.\n\n"
-                "Context: The question is transcribed via Speech-to-Text. "
-                "Expect phonetic mistakes. Infer the intended question.\n\n"
+                "Context: The question is transcribed via Speech-to-Text. Expect phonetic mistakes. Infer the intended question.\n\n"
                 "Formatting: Always wrap key technical concepts in **double asterisks**. "
-                "Always wrap inline code in single backticks (`).\n\n"
+                "Always wrap inline code in single backticks (`). "
+                "ALWAYS wrap the final corrected code block in triple backticks (```[language_name] ... ```).\n\n"
+                
                 f"=== CANDIDATE RESUME ===\n{RESUME if RESUME else '(not provided)'}\n\n"
                 f"=== JOB DESCRIPTION ===\n{JOB_DESC if JOB_DESC else '(not provided)'}\n\n"
                 f"USER QUESTION: {question}"
@@ -200,7 +206,8 @@ class InterviewAI:
                 "model": self.model,
                 "datastoreId": self.datastore_id,
                 "sessionId": session_id,
-                "prompt": full_prompt
+                "prompt": full_prompt,
+                "stream": True  # <--- Request streaming
             }
 
             # Increased timeout to 60s to give Claude time to think
@@ -224,6 +231,21 @@ class AudioRecorder:
         self.frames = []
         self.recording = False
         self._thread = None
+
+    # Add this inside the AudioRecorder class
+    def get_audio_buffer(self):
+        if not self.frames: return None
+        audio = np.concatenate(self.frames, axis=0)
+        audio_int16 = np.int16(audio * 32767)
+        
+        buf = BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(AUDIO_CHANNELS)
+            wf.setsampwidth(2)
+            wf.setframerate(AUDIO_SAMPLERATE)
+            wf.writeframes(audio_int16.tobytes())
+        buf.seek(0)
+        return buf
 
     def record(self):
         if self.recording: return
@@ -261,13 +283,23 @@ class AudioRecorder:
 # ----------------------------------------------------------------------
 # Speech‑to‑text
 # ----------------------------------------------------------------------
-def transcribe_audio(filename, language="en-US"):
+# Replace your current transcribe_audio function with this
+def transcribe_audio(audio_source, language="en-US"):
     recognizer = sr.Recognizer()
     try:
-        with sr.AudioFile(filename) as source:
-            audio_data = recognizer.record(source)
+        # Check if it's a memory buffer or a string filename
+        if isinstance(audio_source, BytesIO):
+            with sr.AudioFile(audio_source) as source:
+                audio_data = recognizer.record(source)
+        else:
+            with sr.AudioFile(audio_source) as source:
+                audio_data = recognizer.record(source)
+                
+        # NOTE: For sub-second transcription, consider replacing recognize_google 
+        # with a faster cloud API (like Groq Whisper) or a local model (faster-whisper)
         return recognizer.recognize_google(audio_data, language=language)
-    except:
+    except Exception as e:
+        print(f"Transcription error: {e}")
         return ""
 
 # ----------------------------------------------------------------------
@@ -280,7 +312,8 @@ class InterviewAssistantApp:
         self.root.wm_attributes("-topmost", True)
         
         # --- NEW: Remove the native Windows title bar ---
-        self.root.overrideredirect(True) 
+        self.root.overrideredirect(True)
+         
         
         self.root.attributes('-alpha', 0.92)
         self.root.config(bg="#282C3A")
@@ -301,18 +334,21 @@ class InterviewAssistantApp:
         # --- NEW: Variables to track dragging ---
         self._offsetx = 0
         self._offsety = 0
+        
 
         self.setup_ui()
 
         # --- NEW: Bind mouse clicks for custom dragging ---
         self.root.bind('<Button-1>', self.click_window)
         self.root.bind('<B1-Motion>', self.drag_window)
+
         
         self.root.bind('<r>', self.toggle_audio_record)
         self.root.bind('<c>', self.toggle_capture_record)
         self.root.bind('<t>', self.toggle_ghost_mode) 
         self.root.bind('<q>', self.on_closing)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
 
     def click_window(self, event):
         # Record the exact spot you clicked inside the window
@@ -324,7 +360,6 @@ class InterviewAssistantApp:
         x = self.root.winfo_pointerx() - self._offsetx
         y = self.root.winfo_pointery() - self._offsety
         self.root.geometry(f"+{x}+{y}")
-
 
     def toggle_ghost_mode(self, event=None):
         if self.is_ghost_mode:
@@ -387,6 +422,7 @@ class InterviewAssistantApp:
 
     def log_chat(self, speaker, text, tag):
         self.chat_display.config(state=tk.NORMAL)
+        
         
         # Mark the exact line where this new message is starting
         start_index = self.chat_display.index(tk.END + "-1c")
@@ -482,7 +518,12 @@ class InterviewAssistantApp:
             threading.Thread(target=self.process_audio_and_capture, args=(captured_image,), daemon=True).start()
 
     def process_audio_only(self):
-        question_text = transcribe_audio(RECORD_FILENAME)
+        # 1. Get audio directly from RAM
+        audio_buffer = self.recorder.get_audio_buffer()
+        
+        # 2. Transcribe from RAM
+        question_text = transcribe_audio(audio_buffer)
+        
         if question_text:
             self.root.after(0, self.log_chat, "Interviewer", question_text, 'interviewer')
             answer = self.ai.ask(question_text)
