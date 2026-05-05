@@ -6,6 +6,7 @@ import wave
 import threading
 import platform
 import ctypes
+
 import json
 from pathlib import Path
 from io import BytesIO
@@ -14,6 +15,7 @@ import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
 import requests
+import mss
 from PIL import Image, ImageGrab
 from dotenv import load_dotenv
 
@@ -113,7 +115,7 @@ class InterviewAI:
         
         # Increase max dimension so the code doesn't get shrunk down
         w, h = image_pil.size
-        max_dim = 2048 # Increased from 1024
+        max_dim = 4096 # Increased from 1024
         if max(h, w) > max_dim:
             scale = max_dim / max(h, w)
             image_pil = image_pil.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
@@ -167,30 +169,23 @@ class InterviewAI:
                 self.upload_image(session_id, image_pil)
 
             # 3. Combine context into a single string with STRICT conversational constraints
-            # 3. Combine context into a single string with softer constraints to bypass Azure filters
+            # 3. Combine context into a single string to act as a problem-solving engineer
             full_prompt = (
                 "- CRITICAL: The user is speaking into a microphone. ALWAYS correct phonetic typos in your head before answering. Do not blindly trust the exact text.\n"
-                "Roleplay Context: You are a candidate in a software engineering job interview. "
+                "Roleplay Context: You are a Senior Software Engineer taking a technical interview. "
                 "Speak naturally out loud to the interviewer, but be highly technical and extremely thorough. "
                 "Please stay in character as a human engineer talking out loud and avoid referencing yourself as an AI.\n\n"
                 
-                "Code Review Instructions: If shown an image of code, perform a strict 'RAW OCR TRANSCRIPT' process. It could be ANY programming language (Python, JavaScript, C++, C#, Java, Go, etc.). Do these 3 things in order:\n"
-                
-                "1. RAW TRANSCRIPTION: Before analyzing anything, you MUST mentally transcribe the code exactly as it appears in the image, pixel-by-pixel. Do NOT auto-correct typos. If the image says `f==open`, you must see `f==open`. If the image says `f.rite`, you must see `f.rite`. If the image uses a period instead of a comma, you must see the period.\n"
-                
-                "2. EXHAUSTIVE COMPARISON: Compare your raw transcript against the correct syntax for that specific programming language. Point out EVERY SINGLE error. \n"
-                "Important Vision Checks:\n"
-                "- Check assignments vs equality operators (e.g. `=` vs `==`).\n"
-                "- Check punctuation separators (e.g. commas `,` vs dots `.`).\n"
-                "- Check for missing line terminators, brackets, or colons based on the language's requirements.\n"
-                
-                "3. FINAL OUTPUT: Casually point out all the specific lines you found that are broken. You MUST quote the exact broken text from your raw transcript. Then, print out the entire, fully corrected code block at the end.\n\n"
+                "Problem Solving Instructions (STRICT ADHERENCE REQUIRED):\n"
+                "1. If the user gives you a coding scenario, DO NOT jump straight to writing code.\n"
+                "2. DATA DRY-RUN (MANDATORY): explicitly write out a 'dry-run' of the provided example input. Map out exact array indices, variable values, and edge cases out loud. Pay strict attention to the EXACT numbers and characters provided in the prompt.\n"
+                "3. Follow the requirements literally.\n"
+                "4. Provide the full code solution wrapped in triple backticks (```[language] ... ```).\n"
+                "5. After the code, briefly explain the Time Complexity (Big-O) and Space Complexity of your solution.\n"
+                "6. MULTI-PART QUESTIONS (CRITICAL): Read the user's prompt carefully to the very end. If they ask any theoretical or follow-up questions (e.g., 'how would you optimize this?', 'how would you scale this?', 'explain the edge cases'), you MUST answer them comprehensively after your complexity analysis.\n\n"
                 
                 "If asked a behavioral question, answer naturally in the first person ('I', 'my') using your resume below. Tailor it to the job description.\n\n"
                 "Context: The question is transcribed via Speech-to-Text. Expect phonetic mistakes. Infer the intended question.\n\n"
-                "Formatting: Always wrap key technical concepts in **double asterisks**. "
-                "Always wrap inline code in single backticks (`). "
-                "ALWAYS wrap the final corrected code block in triple backticks (```[language_name] ... ```).\n\n"
                 
                 f"=== CANDIDATE RESUME ===\n{RESUME if RESUME else '(not provided)'}\n\n"
                 f"=== JOB DESCRIPTION ===\n{JOB_DESC if JOB_DESC else '(not provided)'}\n\n"
@@ -331,6 +326,10 @@ class InterviewAssistantApp:
         self.last_screenshot = None
         self.is_ghost_mode = False 
         
+        
+        self.image_buffer = []
+        self.root.bind('<a>', self.add_to_image_buffer) # Press A to queue an image 
+        
         # --- NEW: Variables to track dragging ---
         self._offsetx = 0
         self._offsety = 0
@@ -351,11 +350,19 @@ class InterviewAssistantApp:
 
 
     def click_window(self, event):
+        # Ignore dragging if the user clicks the text box or scrollbar
+        if event.widget.winfo_class() in ["Text", "Scrollbar"]:
+            return
+        
         # Record the exact spot you clicked inside the window
         self._offsetx = event.x
         self._offsety = event.y
 
     def drag_window(self, event):
+        # Ignore dragging if the user clicks the text box or scrollbar
+        if event.widget.winfo_class() in ["Text", "Scrollbar"]:
+            return
+            
         # Calculate new position and move the window smoothly
         x = self.root.winfo_pointerx() - self._offsetx
         y = self.root.winfo_pointery() - self._offsety
@@ -368,6 +375,46 @@ class InterviewAssistantApp:
         else:
             self.root.attributes('-alpha', 0.15) # Almost fully transparent
             self.is_ghost_mode = True
+
+    def copy_text(self, event=None):
+        try:
+            # Grab the text that is currently highlighted
+            selected_text = self.chat_display.get(tk.SEL_FIRST, tk.SEL_LAST)
+            # Clear the clipboard and append the new text
+            self.root.clipboard_clear()
+            self.root.clipboard_append(selected_text)
+            self.status_lbl.config(text="✅ Copied to clipboard!", fg="#00FF00")
+        except tk.TclError:
+            # This happens if you press Ctrl+C without highlighting anything
+            pass
+        return "break"
+
+    def add_to_image_buffer(self, event=None):
+        if self.recording_mode is not None: return
+
+        # Hide UI, capture, bring back
+        self.root.attributes('-alpha', 0.0)
+        self.root.update()
+        time.sleep(0.15)
+
+        win_x = self.root.winfo_x()
+        win_y = self.root.winfo_y()
+
+        with mss.mss() as sct:
+            target_monitor = sct.monitors[1]
+            for monitor in sct.monitors[1:]:
+                if (monitor["left"] <= win_x < monitor["left"] + monitor["width"] and 
+                    monitor["top"] <= win_y < monitor["top"] + monitor["height"]):
+                    target_monitor = monitor
+                    break
+            sct_img = sct.grab(target_monitor)
+            pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+        # Add image to our list
+        self.image_buffer.append(pil_img)
+
+        self.root.attributes('-alpha', 0.15 if self.is_ghost_mode else 0.85)
+        self.status_lbl.config(text=f"📸 Buffered {len(self.image_buffer)} image(s). Scroll & press 'A' again, or 'C' to send.", fg="#00FF00")
 
     def setup_ui(self):
         # --- NEW LIGHTER & HIGH-CONTRAST COLORS ---
@@ -419,6 +466,9 @@ class InterviewAssistantApp:
         self.chat_display.tag_config('inline_code', foreground="#FFB86C", background="#222633", font=code_font)
         # Code block: darker indented background, standard IDE yellow/green text
         self.chat_display.tag_config('code_block', foreground="#DCDCAA", background="#0D1017", font=code_font, lmargin1=10, lmargin2=10)
+        # --- ENABLE COPYING ---
+        self.chat_display.bind("<Control-c>", self.copy_text)
+        self.chat_display.bind("<Command-c>", self.copy_text) # For Mac users
 
     def log_chat(self, speaker, text, tag):
         self.chat_display.config(state=tk.NORMAL)
@@ -495,19 +545,48 @@ class InterviewAssistantApp:
         if self.recording_mode is None:
             self.recording_mode = 'c'
             
-            # --- Hide UI to take a clean screenshot ---
+            # --- Hide UI to take the final screenshot ---
             self.root.attributes('-alpha', 0.0) 
             self.root.update()
-            time.sleep(0.15) # Give the OS a split second to clear the screen
+            time.sleep(0.15) 
             
-            self.last_screenshot = ImageGrab.grab() 
+            win_x = self.root.winfo_x()
+            win_y = self.root.winfo_y()
+
+            with mss.mss() as sct:
+                target_monitor = sct.monitors[1]
+                for monitor in sct.monitors[1:]:
+                    if (monitor["left"] <= win_x < monitor["left"] + monitor["width"] and 
+                        monitor["top"] <= win_y < monitor["top"] + monitor["height"]):
+                        target_monitor = monitor
+                        break
+                sct_img = sct.grab(target_monitor)
+                final_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
             
+            # Add the final image to the buffer
+            self.image_buffer.append(final_img)
+
+            # --- STITCH IMAGES VERTICALLY ---
+            widths, heights = zip(*(i.size for i in self.image_buffer))
+            total_height = sum(heights)
+            max_width = max(widths)
+
+            stitched_image = Image.new('RGB', (max_width, total_height))
+            y_offset = 0
+            for im in self.image_buffer:
+                stitched_image.paste(im, (0, y_offset))
+                y_offset += im.size[1] # move down for the next image
+
+            # Save the stitched image and clear the buffer for next time
+            self.last_screenshot = stitched_image
+            self.image_buffer = [] 
+
             # --- Bring UI back ---
             self.root.attributes('-alpha', 0.15 if self.is_ghost_mode else 0.85)
             self.root.update()
             
             self.recorder.record()
-            self.status_lbl.config(text="🔴 Screen captured. Recording audio... Press 'C' to send.", fg="#FF5555")
+            self.status_lbl.config(text="🔴 Screen(s) captured. Recording audio... Press 'C' to send.", fg="#FF5555")
             
         elif self.recording_mode == 'c':
             self.status_lbl.config(text="⏳ Analyzing screen and thinking...", fg="#00E5FF")
