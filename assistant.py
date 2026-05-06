@@ -109,6 +109,38 @@ class InterviewAI:
         else:
             raise RuntimeError(f"Invalid session response: {response_data}")
 
+    def ask_quick_intro(self, question: str) -> str:
+        try:
+            # FIXED: Added Roleplay instructions and injected your RESUME
+            intro_prompt = (
+                "Roleplay Context: You are a Software Engineer in a job interview. "
+                "NEVER mention you are an AI. Speak naturally in the first person ('I', 'my').\n\n"
+                f"=== YOUR RESUME ===\n{RESUME if RESUME else '(not provided)'}\n\n"
+                f"Interviewer asked: '{question}'.\n"
+                "Provide EXACTLY one short, conversational opening sentence to answer this. "
+                "Keep it under 15 words. No code. No pleasantries."
+            )
+
+            headers = {
+                "Content-Type": "application/json",
+                "x-msi-genai-api-key": self.api_key
+            }
+            
+            payload = {
+                "userId": self.user_id,
+                "model": "ChatGPT4o-mini", 
+                "prompt": intro_prompt,
+                "stream": False 
+            }
+
+            response = requests.post(self.chat_url, headers=headers, json=payload, timeout=5)
+            if response.status_code != 200:
+                return "..." 
+            
+            return self.extract_text_from_response(response.json())
+        except Exception:
+            return "..."
+    
     def upload_image(self, session_id: str, image_pil) -> bool:
         headers = {"x-msi-genai-api-key": self.api_key}
         image_pil = image_pil.convert('RGB')
@@ -216,6 +248,60 @@ class InterviewAI:
             return self.extract_text_from_response(response.json())
         except Exception as e:
             return f"Request failed: {str(e)}"
+        
+
+    def ask_stream(self, question: str, image_pil=None):
+        try:
+            session_id = self.get_or_create_session()
+            
+            if image_pil is not None:
+                self.upload_image(session_id, image_pil)
+
+            full_prompt = (
+                # ... (keep your exact same prompt string here) ...
+                f"=== CANDIDATE RESUME ===\n{RESUME if RESUME else '(not provided)'}\n\n"
+                f"=== JOB DESCRIPTION ===\n{JOB_DESC if JOB_DESC else '(not provided)'}\n\n"
+                f"USER QUESTION: {question}"
+            )
+
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream", # <--- CRITICAL FIX 1: Tell gateway to stream
+                "x-msi-genai-api-key": self.api_key
+            }
+            payload = {
+                "userId": self.user_id,
+                "model": self.model,
+                "datastoreId": self.datastore_id,
+                "sessionId": session_id,
+                "prompt": full_prompt,
+                "stream": True 
+            }
+
+            response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=60, stream=True)
+            
+            if response.status_code != 200:
+                yield f"API error {response.status_code}: {response.text[:300]}"
+                return
+
+            # CRITICAL FIX 2: Decode raw bytes directly to prevent `requests` library from buffering
+            for line in response.iter_lines(decode_unicode=True):
+                if line:
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            json_chunk = json.loads(data_str)
+                            text_chunk = self.extract_text_from_response(json_chunk)
+                            if text_chunk:
+                                # Print to terminal so you can verify it's arriving fast
+                                print(f"DEBUG CHUNK: {text_chunk}", flush=True) 
+                                yield text_chunk
+                        except Exception:
+                            continue
+        except Exception as e:
+            yield f"Request failed: {str(e)}"
         
 # ----------------------------------------------------------------------
 # Audio recorder
@@ -347,6 +433,29 @@ class InterviewAssistantApp:
         self.root.bind('<t>', self.toggle_ghost_mode) 
         self.root.bind('<q>', self.on_closing)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def _start_stream_ui(self, speaker):
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.insert(tk.END, f"✨ {speaker}\n", 'ai_name')
+        
+        # Mark where the stream starts so we can re-format it later
+        self.stream_start_index = self.chat_display.index(tk.END)
+        self.chat_display.see(tk.END)
+        self.chat_display.update_idletasks()
+
+    def _append_stream_chunk(self, chunk):
+        # Append plain text in real-time
+        self.chat_display.insert(tk.END, chunk, 'ai_text')
+        self.chat_display.see(tk.END)
+        
+        # Hard force the UI to draw this exact word right now
+        self.chat_display.update()
+
+    def _finalize_stream_ui(self, full_text):
+        # Optional: Once the stream is done, erase the plain text and run it 
+        # through your existing Markdown/Code highlighter logic so it looks pretty!
+        self.chat_display.delete(self.stream_start_index, tk.END)
+        self.log_chat("AI Assistant", full_text, 'ai') # Re-uses your markdown formatter
 
 
     def click_window(self, event):
@@ -597,20 +706,43 @@ class InterviewAssistantApp:
             threading.Thread(target=self.process_audio_and_capture, args=(captured_image,), daemon=True).start()
 
     def process_audio_only(self):
-        # 1. Get audio directly from RAM
-        audio_buffer = self.recorder.get_audio_buffer()
+        # Let the user know the audio is being transcribed (takes ~2-3 secs)
+        self.root.after(0, lambda: self.status_lbl.config(text="🎙️ Transcribing audio...", fg="#E2B714"))
         
-        # 2. Transcribe from RAM
+        audio_buffer = self.recorder.get_audio_buffer()
         question_text = transcribe_audio(audio_buffer)
         
         if question_text:
             self.root.after(0, self.log_chat, "Interviewer", question_text, 'interviewer')
-            answer = self.ai.ask(question_text)
-            self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
+            self.root.after(0, lambda: self.status_lbl.config(text="⚡ Fetching Quick Intro...", fg="#00E5FF"))
+            
+            # --- TWO-STEP PARALLEL EXECUTION ---
+            
+            def fetch_quick_intro():
+                # This should now finish in ~1 to 2 seconds flat
+                intro = self.ai.ask_quick_intro(question_text)
+                if intro and intro != "...":
+                    # Put it on screen
+                    self.root.after(0, self.log_chat, "AI Assistant", f"💡 *Quick thought:* {intro}", 'ai')
+                    
+                    # 🛑 TRICK 3: Force the UI window to hard-refresh immediately!
+                    self.root.after(50, self.root.update)
+
+            def fetch_deep_dive():
+                # Does the heavy database search + full code generation
+                answer = self.ai.ask(question_text)
+                self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
+                self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
+
+            # Start the quick intro immediately
+            threading.Thread(target=fetch_quick_intro, daemon=True).start()
+            
+            # Give the gateway a tiny breather before slamming it with the heavy request
+            self.root.after(500, lambda: threading.Thread(target=fetch_deep_dive, daemon=True).start())
+
         else:
             self.root.after(0, self.log_chat, "System", "No speech detected. Please try again.", 'system')
-            
-        self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
+            self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
 
     def process_audio_and_capture(self, image_pil):
         question_text = transcribe_audio(RECORD_FILENAME)
