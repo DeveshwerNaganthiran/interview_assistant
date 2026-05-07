@@ -59,31 +59,27 @@ JOB_DESC = load_text(JOB_DESC_PATH)
 class InterviewAI:
     def __init__(self):
         self.host = os.getenv('MSI_HOST', "https://genai-service.stage.commandcentral.com/app-gateway/api/v2")
-        self.api_key = os.getenv('MSI_API_KEY', "(I9ZpcAsjzv*aSwdRHxc3nOnuZR1LY!aNkxPG~e9")
-        self.user_id = os.getenv('MSI_USER_ID', "rnj673@motorolasolutions.com")
+        self.api_key = os.getenv('MSI_API_KEY', "6HvdDU8.71Q(~C:Tb-jm2pKbdreja4qQ!Vu6YhBg")
+        self.user_id = os.getenv('MSI_USER_ID', "bgvk38@motorolasolutions.com")
         self.datastore_id = os.getenv('MSI_DATASTORE_ID', "1579319e-2b48-4bad-9825-4a7dd10ac0ef")
-        self.model = os.getenv('MSI_MODEL', "Claude-Sonnet-3_7") # Ensure Claude is set here if .env fails
         
         self.chat_url = self.host + "/chat"
         self.upload_url = self.host + "/upload"
  
         self.http = requests.Session()
         self.http.headers.update({
-            "Connection": "close", 
+            "Connection": "keep-alive", 
             "Cache-Control": "no-cache", 
             "Pragma": "no-cache"
         })
         
-        self.max_image_dim = int(os.getenv("MSI_MAX_IMAGE_DIM", "1024"))
-        self.jpeg_quality = int(os.getenv("MSI_JPEG_QUALITY", "85"))
-        
-        # SPEED OPTIMIZATION: Cache the session so we don't recreate it every question
-        self.active_session_id = None
+        # --- FIX 1: Dictionary to hold separate sessions for GPT and Claude ---
+        self.active_sessions = {}
 
-    def get_or_create_session(self) -> str:
-        """Returns the active session or creates a new one if it doesn't exist."""
-        if self.active_session_id:
-            return self.active_session_id
+    def get_or_create_session(self, model_name: str) -> str:
+        """Creates a unique session for EACH model to prevent 403 Forbidden errors."""
+        if model_name in self.active_sessions:
+            return self.active_sessions[model_name]
 
         headers = {
             "Content-Type": "application/json",
@@ -91,27 +87,25 @@ class InterviewAI:
         }
         payload = {
             "userId": self.user_id,
-            "model": self.model,
+            "model": model_name,
             "datastoreId": self.datastore_id,
             "prompt": "init"
-            
         }
         
-        # Increased timeout to 45s for heavy models like Claude
         response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=45)
         if response.status_code >= 400:
-            raise RuntimeError(f"Session init failed {response.status_code}: {response.text}")
+            print(f"Warning: Session init failed for {model_name}. Error {response.status_code}")
+            return "" # Fallback gracefully
         
         response_data = response.json()
         if response_data.get("status") and "sessionId" in response_data:
-            self.active_session_id = response_data["sessionId"]
-            return self.active_session_id
-        else:
-            raise RuntimeError(f"Invalid session response: {response_data}")
+            self.active_sessions[model_name] = response_data["sessionId"]
+            return self.active_sessions[model_name]
+        return ""
 
     def ask_quick_intro(self, question: str) -> str:
+        # (Keep your highly optimized version here without datastoreId!)
         try:
-            # FIXED: Added Roleplay instructions and injected your RESUME
             intro_prompt = (
                 "Roleplay Context: You are a Software Engineer in a job interview. "
                 "NEVER mention you are an AI. Speak naturally in the first person ('I', 'my').\n\n"
@@ -120,54 +114,48 @@ class InterviewAI:
                 "Provide EXACTLY one short, conversational opening sentence to answer this. "
                 "Keep it under 15 words. No code. No pleasantries."
             )
-
             headers = {
                 "Content-Type": "application/json",
                 "x-msi-genai-api-key": self.api_key
             }
-            
             payload = {
                 "userId": self.user_id,
-                "model": "ChatGPT4o-mini", 
+                "model": "ChatGPT4o-mini", # Super fast model for intro
                 "prompt": intro_prompt,
                 "stream": False 
             }
-
             response = requests.post(self.chat_url, headers=headers, json=payload, timeout=5)
-            if response.status_code != 200:
-                return "..." 
-            
-            return self.extract_text_from_response(response.json())
+            if response.status_code == 200:
+                return self.extract_text_from_response(response.json())
         except Exception:
-            return "..."
-    
+            pass
+        return "..."
+
     def upload_image(self, session_id: str, image_pil) -> bool:
+        # (Keep your existing upload_image code here exactly as it is)
         headers = {"x-msi-genai-api-key": self.api_key}
         image_pil = image_pil.convert('RGB')
         
-        # Increase max dimension so the code doesn't get shrunk down
         w, h = image_pil.size
-        max_dim = 4096 # Increased from 1024
+        max_dim = 4096 
         if max(h, w) > max_dim:
             scale = max_dim / max(h, w)
             image_pil = image_pil.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
         buf = BytesIO()
-        # USE PNG FOR CODE SCREENSHOTS - NEVER JPEG
         image_pil.save(buf, format="PNG") 
         image_bytes = buf.getvalue()
         
         url = f"{self.upload_url}/{session_id}?userId={self.user_id}"
-        # Make sure the mime type is image/png
         files = {"file": ("image.png", image_bytes, "image/png")} 
         
         response = self.http.post(url, headers=headers, files=files, timeout=45)
-        
         if response.status_code != 200:
-            raise RuntimeError(f"Upload failed {response.status_code}: {response.text}")
+            raise RuntimeError(f"Upload failed {response.status_code}")
         return True
 
     def extract_text_from_response(self, response_data: dict) -> str:
+        # (Keep your existing extract_text_from_response code here)
         try:
             ans = ""
             if "data" in response_data and isinstance(response_data["data"], dict):
@@ -176,13 +164,11 @@ class InterviewAI:
                     if k in data and isinstance(data[k], str) and data[k].strip():
                         ans = data[k].strip()
                         break
-
             if not ans:
                 for k in ["message", "response", "text", "msg"]:
                     if k in response_data and isinstance(response_data[k], str) and response_data[k].strip():
                         ans = response_data[k].strip()
                         break
-            
             if not ans:
                 ans = json.dumps(response_data)
                 
@@ -192,32 +178,38 @@ class InterviewAI:
         except Exception:
             return ""
 
-    def ask(self, question: str, image_pil = None) -> str:
+    def ask(self, question: str, image_pil=None) -> str:
         try:
-            # SPEED OPTIMIZATION: Uses cached session instead of creating a new one
-            session_id = self.get_or_create_session()
-            
-            if image_pil is not None:
-                self.upload_image(session_id, image_pil)
+            # --- FIX 2: Dynamic Model Routing ---
+            if image_pil is None:
+                # 'R' pressed (Audio Only) -> Use GPT
+                current_model = "ChatGPT4o-mini" 
+            else:
+                # 'C' pressed (Image Capture) -> Use Claude
+                current_model = "VertexGemini" 
+                print(f"📷 Image detected! Routing to {current_model}...")
 
-            # 3. Combine context into a single string with STRICT conversational constraints
-            # 3. Combine context into a single string to act as a problem-solving engineer
+            # Get the correct session for the chosen model to avoid 403 Forbidden
+            session_id = self.get_or_create_session(current_model)
+            
+            if image_pil is not None and session_id:
+                self.upload_image(session_id, image_pil)
+                import time
+                time.sleep(1.5) # Give gateway time to process the image
+
             full_prompt = (
-                "- CRITICAL: The user is speaking into a microphone. ALWAYS correct phonetic typos in your head before answering. Do not blindly trust the exact text.\n"
+                "- CRITICAL: The user is speaking into a microphone. ALWAYS correct phonetic typos in your head before answering.\n"
                 "Roleplay Context: You are a Senior Software Engineer taking a technical interview. "
                 "Speak naturally out loud to the interviewer, but be highly technical and extremely thorough. "
                 "Please stay in character as a human engineer talking out loud and avoid referencing yourself as an AI.\n\n"
                 
                 "Problem Solving Instructions (STRICT ADHERENCE REQUIRED):\n"
                 "1. If the user gives you a coding scenario, DO NOT jump straight to writing code.\n"
-                "2. DATA DRY-RUN (MANDATORY): explicitly write out a 'dry-run' of the provided example input. Map out exact array indices, variable values, and edge cases out loud. Pay strict attention to the EXACT numbers and characters provided in the prompt.\n"
+                "2. DATA DRY-RUN (MANDATORY): explicitly write out a 'dry-run' of the provided example input. Map out exact array indices, variable values, and edge cases out loud.\n"
                 "3. Follow the requirements literally.\n"
                 "4. Provide the full code solution wrapped in triple backticks (```[language] ... ```).\n"
                 "5. After the code, briefly explain the Time Complexity (Big-O) and Space Complexity of your solution.\n"
-                "6. MULTI-PART QUESTIONS (CRITICAL): Read the user's prompt carefully to the very end. If they ask any theoretical or follow-up questions (e.g., 'how would you optimize this?', 'how would you scale this?', 'explain the edge cases'), you MUST answer them comprehensively after your complexity analysis.\n\n"
-                
-                "If asked a behavioral question, answer naturally in the first person ('I', 'my') using your resume below. Tailor it to the job description.\n\n"
-                "Context: The question is transcribed via Speech-to-Text. Expect phonetic mistakes. Infer the intended question.\n\n"
+                "6. MULTI-PART QUESTIONS (CRITICAL): Read the user's prompt carefully to the very end and answer follow-up questions.\n\n"
                 
                 f"=== CANDIDATE RESUME ===\n{RESUME if RESUME else '(not provided)'}\n\n"
                 f"=== JOB DESCRIPTION ===\n{JOB_DESC if JOB_DESC else '(not provided)'}\n\n"
@@ -228,80 +220,33 @@ class InterviewAI:
                 "Content-Type": "application/json",
                 "x-msi-genai-api-key": self.api_key
             }
+            
+            # If session_id failed to generate, we pass it without a sessionId
             payload = {
                 "userId": self.user_id,
-                "model": self.model,
+                "model": current_model,
                 "datastoreId": self.datastore_id,
-                "sessionId": session_id,
                 "prompt": full_prompt,
-                "stream": True  # <--- Request streaming
+                "stream": False 
             }
+            if session_id:
+                payload["sessionId"] = session_id
 
-            # Increased timeout to 60s to give Claude time to think
-            response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=60)
+            # --- FIX 3: INCREASE TIMEOUT TO 300 SECONDS (5 MINUTES) ---
+            # timeout=(connect_timeout, read_timeout)
+            # This ensures the connection stays open while the AI writes massive code blocks!
+            response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=(15, 300))
+            
             if response.status_code != 200:
-                # If the session expired on the server, reset it for the next try
                 if response.status_code in [401, 403, 404]:
-                    self.active_session_id = None 
+                    # Clear the bad session so it recreates next time
+                    if current_model in self.active_sessions:
+                        del self.active_sessions[current_model]
                 return f"API error {response.status_code}: {response.text[:300]}"
             
             return self.extract_text_from_response(response.json())
         except Exception as e:
             return f"Request failed: {str(e)}"
-        
-
-    def ask_stream(self, question: str, image_pil=None):
-        try:
-            session_id = self.get_or_create_session()
-            
-            if image_pil is not None:
-                self.upload_image(session_id, image_pil)
-
-            full_prompt = (
-                # ... (keep your exact same prompt string here) ...
-                f"=== CANDIDATE RESUME ===\n{RESUME if RESUME else '(not provided)'}\n\n"
-                f"=== JOB DESCRIPTION ===\n{JOB_DESC if JOB_DESC else '(not provided)'}\n\n"
-                f"USER QUESTION: {question}"
-            )
-
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream", # <--- CRITICAL FIX 1: Tell gateway to stream
-                "x-msi-genai-api-key": self.api_key
-            }
-            payload = {
-                "userId": self.user_id,
-                "model": self.model,
-                "datastoreId": self.datastore_id,
-                "sessionId": session_id,
-                "prompt": full_prompt,
-                "stream": True 
-            }
-
-            response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=60, stream=True)
-            
-            if response.status_code != 200:
-                yield f"API error {response.status_code}: {response.text[:300]}"
-                return
-
-            # CRITICAL FIX 2: Decode raw bytes directly to prevent `requests` library from buffering
-            for line in response.iter_lines(decode_unicode=True):
-                if line:
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            json_chunk = json.loads(data_str)
-                            text_chunk = self.extract_text_from_response(json_chunk)
-                            if text_chunk:
-                                # Print to terminal so you can verify it's arriving fast
-                                print(f"DEBUG CHUNK: {text_chunk}", flush=True) 
-                                yield text_chunk
-                        except Exception:
-                            continue
-        except Exception as e:
-            yield f"Request failed: {str(e)}"
         
 # ----------------------------------------------------------------------
 # Audio recorder
@@ -312,10 +257,13 @@ class AudioRecorder:
         self.frames = []
         self.recording = False
         self._thread = None
+        self.actual_samplerate = 16000 # Default, will be updated dynamically
 
-    # Add this inside the AudioRecorder class
     def get_audio_buffer(self):
-        if not self.frames: return None
+        if not self.frames: 
+            print("❌ Error: No audio frames captured. Microphone thread may have crashed.", flush=True)
+            return None
+            
         audio = np.concatenate(self.frames, axis=0)
         audio_int16 = np.int16(audio * 32767)
         
@@ -323,7 +271,7 @@ class AudioRecorder:
         with wave.open(buf, 'wb') as wf:
             wf.setnchannels(AUDIO_CHANNELS)
             wf.setsampwidth(2)
-            wf.setframerate(AUDIO_SAMPLERATE)
+            wf.setframerate(int(self.actual_samplerate))
             wf.writeframes(audio_int16.tobytes())
         buf.seek(0)
         return buf
@@ -343,13 +291,33 @@ class AudioRecorder:
         self._save()
 
     def _record_loop(self):
-        def callback(indata, frames, time_info, status):
-            if self.recording:
-                self.frames.append(indata.copy())
-        with sd.InputStream(samplerate=AUDIO_SAMPLERATE, channels=AUDIO_CHANNELS,
-                            callback=callback, dtype='float32'):
-            while self.recording:
-                sd.sleep(100)
+        try:
+            # 1. Ask Windows what the default microphone is and its required sample rate
+            device_info = sd.query_devices(None, 'input')
+            self.actual_samplerate = int(device_info['default_samplerate'])
+            print(f"\n✅ USING MICROPHONE: {device_info['name']} @ {self.actual_samplerate}Hz", flush=True)
+
+            # 2. Callback to store audio frames and print a live volume meter
+            def callback(indata, frames, time_info, status):
+                if status:
+                    print(f"Audio Status Warning: {status}", flush=True)
+                if self.recording:
+                    self.frames.append(indata.copy())
+                    
+                    # Optional: Print a tiny volume meter in the terminal to prove it hears you
+                    volume_norm = np.linalg.norm(indata) * 10
+                    if volume_norm > 1.0:
+                        print("🔊" + "|" * int(volume_norm), flush=True)
+
+            # 3. Start listening using the dynamic sample rate
+            with sd.InputStream(samplerate=self.actual_samplerate, channels=AUDIO_CHANNELS,
+                                callback=callback, dtype='float32'):
+                while self.recording:
+                    sd.sleep(100)
+                    
+        except Exception as e:
+            print(f"\n❌ FATAL MICROPHONE ERROR: {e}", flush=True)
+            self.recording = False
 
     def _save(self):
         if not self.frames: return
@@ -358,9 +326,8 @@ class AudioRecorder:
         with wave.open(self.filename, 'wb') as wf:
             wf.setnchannels(AUDIO_CHANNELS)
             wf.setsampwidth(2)
-            wf.setframerate(AUDIO_SAMPLERATE)
+            wf.setframerate(int(self.actual_samplerate))
             wf.writeframes(audio_int16.tobytes())
-
 # ----------------------------------------------------------------------
 # Speech‑to‑text
 # ----------------------------------------------------------------------
@@ -389,6 +356,7 @@ def transcribe_audio(audio_source, language="en-US"):
 class InterviewAssistantApp:
     def __init__(self, root, ai, recorder):
         self.root = root
+        self.root.title("Service Host: Windows Equatorial Input")
         self.root.geometry("440x650-20+20") 
         self.root.wm_attributes("-topmost", True)
         
