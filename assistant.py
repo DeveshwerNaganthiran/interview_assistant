@@ -186,7 +186,7 @@ class InterviewAI:
                 current_model = "ChatGPT4o-mini" 
             else:
                 # 'C' pressed (Image Capture) -> Use Claude
-                current_model = "VertexGemini" 
+                current_model = "ChatGPT4o-mini" 
                 print(f"📷 Image detected! Routing to {current_model}...")
 
             # Get the correct session for the chosen model to avoid 403 Forbidden
