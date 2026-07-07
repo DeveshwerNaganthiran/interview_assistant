@@ -2,6 +2,7 @@
 myenv/
 venv/
 env/
+vosk-model-small-en-us-0.15/
 
 # Ignore Python cache files
 __pycache__/
@@ -9,3 +10,4 @@ build/
 dist/
 *.pyc
 last_question.wav
+test_mic.py/

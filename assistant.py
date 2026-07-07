@@ -2,21 +2,20 @@ import os
 import sys
 import time
 import base64
-import wave
 import threading
 import platform
 import ctypes
-
 import json
+import queue
 from pathlib import Path
 from io import BytesIO
 
 import numpy as np
 import sounddevice as sd
-import speech_recognition as sr
+from vosk import Model, KaldiRecognizer
 import requests
 import mss
-from PIL import Image, ImageGrab
+from PIL import Image
 from dotenv import load_dotenv
 
 # Enforce override to ensure the correct API key is grabbed
@@ -36,10 +35,6 @@ MSI_DATASTORE_ID = os.getenv("MSI_DATASTORE_ID")
 
 RESUME_PATH = "resume.txt"
 JOB_DESC_PATH = "job_description.txt"
-
-AUDIO_SAMPLERATE = 16000
-AUDIO_CHANNELS = 1
-RECORD_FILENAME = "last_question.wav"
 
 # ----------------------------------------------------------------------
 # Load static context
@@ -72,12 +67,9 @@ class InterviewAI:
             "Cache-Control": "no-cache", 
             "Pragma": "no-cache"
         })
-        
-        # --- FIX 1: Dictionary to hold separate sessions for GPT and Claude ---
         self.active_sessions = {}
 
     def get_or_create_session(self, model_name: str) -> str:
-        """Creates a unique session for EACH model to prevent 403 Forbidden errors."""
         if model_name in self.active_sessions:
             return self.active_sessions[model_name]
 
@@ -95,7 +87,7 @@ class InterviewAI:
         response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=45)
         if response.status_code >= 400:
             print(f"Warning: Session init failed for {model_name}. Error {response.status_code}")
-            return "" # Fallback gracefully
+            return ""
         
         response_data = response.json()
         if response_data.get("status") and "sessionId" in response_data:
@@ -104,7 +96,6 @@ class InterviewAI:
         return ""
 
     def ask_quick_intro(self, question: str) -> str:
-        # (Keep your highly optimized version here without datastoreId!)
         try:
             intro_prompt = (
                 "Roleplay Context: You are a Software Engineer in a job interview. "
@@ -120,7 +111,7 @@ class InterviewAI:
             }
             payload = {
                 "userId": self.user_id,
-                "model": "ChatGPT4o-mini", # Super fast model for intro
+                "model": "ChatGPT4o-mini",
                 "prompt": intro_prompt,
                 "stream": False 
             }
@@ -132,7 +123,6 @@ class InterviewAI:
         return "..."
 
     def upload_image(self, session_id: str, image_pil) -> bool:
-        # (Keep your existing upload_image code here exactly as it is)
         headers = {"x-msi-genai-api-key": self.api_key}
         image_pil = image_pil.convert('RGB')
         
@@ -155,7 +145,6 @@ class InterviewAI:
         return True
 
     def extract_text_from_response(self, response_data: dict) -> str:
-        # (Keep your existing extract_text_from_response code here)
         try:
             ans = ""
             if "data" in response_data and isinstance(response_data["data"], dict):
@@ -178,24 +167,19 @@ class InterviewAI:
         except Exception:
             return ""
 
-    def ask(self, question: str, image_pil=None) -> str:
+    def ask(self, question: str, image_pil=None, chunk_callback=None) -> str:
         try:
-            # --- FIX 2: Dynamic Model Routing ---
             if image_pil is None:
-                # 'R' pressed (Audio Only) -> Use GPT
                 current_model = "ChatGPT4o-mini" 
             else:
-                # 'C' pressed (Image Capture) -> Use Claude
                 current_model = "ChatGPT4o-mini" 
                 print(f"📷 Image detected! Routing to {current_model}...")
 
-            # Get the correct session for the chosen model to avoid 403 Forbidden
             session_id = self.get_or_create_session(current_model)
             
             if image_pil is not None and session_id:
                 self.upload_image(session_id, image_pil)
-                import time
-                time.sleep(1.5) # Give gateway time to process the image
+                time.sleep(1.5) 
 
             full_prompt = (
                 "- CRITICAL: The user is speaking into a microphone. ALWAYS correct phonetic typos in your head before answering.\n"
@@ -221,134 +205,157 @@ class InterviewAI:
                 "x-msi-genai-api-key": self.api_key
             }
             
-            # If session_id failed to generate, we pass it without a sessionId
             payload = {
                 "userId": self.user_id,
                 "model": current_model,
                 "datastoreId": self.datastore_id,
                 "prompt": full_prompt,
-                "stream": False 
+                "stream": chunk_callback is not None # 🔴 NEW: Tell API to stream if callback exists
             }
             if session_id:
                 payload["sessionId"] = session_id
 
-            # --- FIX 3: INCREASE TIMEOUT TO 300 SECONDS (5 MINUTES) ---
-            # timeout=(connect_timeout, read_timeout)
-            # This ensures the connection stays open while the AI writes massive code blocks!
-            response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=(15, 300))
+            # 🔴 NEW: stream parameter added to requests
+            response = self.http.post(self.chat_url, headers=headers, json=payload, timeout=(15, 300), stream=(chunk_callback is not None))
             
             if response.status_code != 200:
                 if response.status_code in [401, 403, 404]:
-                    # Clear the bad session so it recreates next time
                     if current_model in self.active_sessions:
                         del self.active_sessions[current_model]
                 return f"API error {response.status_code}: {response.text[:300]}"
             
-            return self.extract_text_from_response(response.json())
+            # 🔴 NEW: Streaming chunk processor
+            if chunk_callback:
+                full_answer = ""
+                for line in response.iter_lines():
+                    if line:
+                        decoded_line = line.decode('utf-8')
+                        if decoded_line.startswith('data: '):
+                            decoded_line = decoded_line[6:]
+                        if decoded_line == '[DONE]':
+                            break
+                        try:
+                            data = json.loads(decoded_line)
+                            chunk = ""
+                            
+                            # Safely extract text depending on how the gateway formats it
+                            if "choices" in data and len(data["choices"]) > 0:
+                                chunk = data["choices"][0].get("delta", {}).get("content", "")
+                            elif "data" in data and isinstance(data["data"], dict) and "text" in data["data"]:
+                                chunk = data["data"]["text"]
+                            elif "text" in data:
+                                chunk = data["text"]
+                                
+                            if chunk:
+                                # Smart append: prevents doubling up if API sends cumulative string
+                                if chunk.startswith(full_answer) and len(chunk) > len(full_answer):
+                                    new_text = chunk[len(full_answer):]
+                                    full_answer = chunk
+                                    chunk_callback(new_text)
+                                else:
+                                    full_answer += chunk
+                                    chunk_callback(chunk)
+                        except json.JSONDecodeError:
+                            pass
+                return full_answer
+            else:
+                return self.extract_text_from_response(response.json())
         except Exception as e:
             return f"Request failed: {str(e)}"
         
 # ----------------------------------------------------------------------
-# Audio recorder
+# NEW: Real-Time Vosk Audio Recorder
 # ----------------------------------------------------------------------
 class AudioRecorder:
-    def __init__(self, filename=RECORD_FILENAME):
-        self.filename = filename
-        self.frames = []
+    def __init__(self, model_path="vosk-model-small-en-us-0.15"):
+        self.q = queue.Queue()
         self.recording = False
         self._thread = None
-        self.actual_samplerate = 16000 # Default, will be updated dynamically
-
-    def get_audio_buffer(self):
-        if not self.frames: 
-            print("❌ Error: No audio frames captured. Microphone thread may have crashed.", flush=True)
-            return None
-            
-        audio = np.concatenate(self.frames, axis=0)
-        audio_int16 = np.int16(audio * 32767)
+        self.actual_samplerate = 16000
+        self.on_text_update = None # UI callback
         
-        buf = BytesIO()
-        with wave.open(buf, 'wb') as wf:
-            wf.setnchannels(AUDIO_CHANNELS)
-            wf.setsampwidth(2)
-            wf.setframerate(int(self.actual_samplerate))
-            wf.writeframes(audio_int16.tobytes())
-        buf.seek(0)
-        return buf
+        print(f"Loading Vosk model from '{model_path}'... This takes a second.", flush=True)
+        try:
+            self.model = Model(model_path)
+            print("✅ Vosk model loaded successfully!", flush=True)
+        except Exception as e:
+            print(f"❌ Failed to load Vosk model: {e}")
+            print(f"Make sure you downloaded the model and extracted it to the folder '{model_path}' next to this script.")
+            sys.exit(1)
+
+        self.final_text = ""
+        self.live_text = ""
 
     def record(self):
         if self.recording: return
-        self.frames = []
+        
+        # Clear any old audio bits left in the queue
+        while not self.q.empty():
+            self.q.get_nowait()
+            
         self.recording = True
-        self._thread = threading.Thread(target=self._record_loop)
+        self.final_text = ""
+        self.live_text = ""
+        self._thread = threading.Thread(target=self._record_loop, daemon=True)
         self._thread.start()
 
     def stop(self):
-        if not self.recording: return
+        if not self.recording: return ""
         self.recording = False
         if self._thread:
             self._thread.join()
-        self._save()
+            
+        # Combine the confirmed text + any trailing partial text
+        full_text = (self.final_text + " " + self.live_text).strip()
+        return full_text
 
     def _record_loop(self):
         try:
-            # 1. Ask Windows what the default microphone is and its required sample rate
-            device_info = sd.query_devices(None, 'input')
-            self.actual_samplerate = int(device_info['default_samplerate'])
-            print(f"\n✅ USING MICROPHONE: {device_info['name']} @ {self.actual_samplerate}Hz", flush=True)
+            # 🔴 CRITICAL FIX: Force exactly 16000 Hz instead of your system's 44100 Hz
+            self.actual_samplerate = 16000 
+            rec = KaldiRecognizer(self.model, self.actual_samplerate)
 
-            # 2. Callback to store audio frames and print a live volume meter
             def callback(indata, frames, time_info, status):
                 if status:
-                    print(f"Audio Status Warning: {status}", flush=True)
+                    pass 
                 if self.recording:
-                    self.frames.append(indata.copy())
+                    # Convert raw audio bytes to measure volume
+                    audio_data = np.frombuffer(indata, dtype=np.int16)
+                    rms_volume = np.sqrt(np.mean(np.square(audio_data.astype(np.float32))))
                     
-                    # Optional: Print a tiny volume meter in the terminal to prove it hears you
-                    volume_norm = np.linalg.norm(indata) * 10
-                    if volume_norm > 1.0:
-                        print("🔊" + "|" * int(volume_norm), flush=True)
+                    # 🔴 NOISE GATE: Based on your test, your room is < 5.0 and your voice is > 1000.
+                    # Anything under 50 is ignored to prevent hallucinations.
+                    if rms_volume > 50.0:
+                        self.q.put(bytes(indata))
 
-            # 3. Start listening using the dynamic sample rate
-            with sd.InputStream(samplerate=self.actual_samplerate, channels=AUDIO_CHANNELS,
-                                callback=callback, dtype='float32'):
+            # Open stream specifically locked to 16000 Hz
+            with sd.RawInputStream(samplerate=self.actual_samplerate, blocksize=8000, 
+                                   dtype='int16', channels=1, callback=callback):
                 while self.recording:
-                    sd.sleep(100)
-                    
+                    try:
+                        # Grab audio chunks from microphone
+                        data = self.q.get(timeout=0.1)
+                        if rec.AcceptWaveform(data):
+                            # A full phrase was completed
+                            result = json.loads(rec.Result())
+                            text = result.get("text", "")
+                            if text:
+                                self.final_text += text + " "
+                                if self.on_text_update:
+                                    self.on_text_update(self.final_text)
+                        else:
+                            # A phrase is currently being spoken (partial/live)
+                            partial = json.loads(rec.PartialResult())
+                            partial_text = partial.get("partial", "")
+                            if partial_text:
+                                self.live_text = partial_text
+                                if self.on_text_update:
+                                    self.on_text_update(self.final_text + partial_text)
+                    except queue.Empty:
+                        pass
         except Exception as e:
             print(f"\n❌ FATAL MICROPHONE ERROR: {e}", flush=True)
             self.recording = False
-
-    def _save(self):
-        if not self.frames: return
-        audio = np.concatenate(self.frames, axis=0)
-        audio_int16 = np.int16(audio * 32767)
-        with wave.open(self.filename, 'wb') as wf:
-            wf.setnchannels(AUDIO_CHANNELS)
-            wf.setsampwidth(2)
-            wf.setframerate(int(self.actual_samplerate))
-            wf.writeframes(audio_int16.tobytes())
-# ----------------------------------------------------------------------
-# Speech‑to‑text
-# ----------------------------------------------------------------------
-# Replace your current transcribe_audio function with this
-def transcribe_audio(audio_source, language="en-US"):
-    recognizer = sr.Recognizer()
-    try:
-        # Check if it's a memory buffer or a string filename
-        if isinstance(audio_source, BytesIO):
-            with sr.AudioFile(audio_source) as source:
-                audio_data = recognizer.record(source)
-        else:
-            with sr.AudioFile(audio_source) as source:
-                audio_data = recognizer.record(source)
-                
-        # NOTE: For sub-second transcription, consider replacing recognize_google 
-        # with a faster cloud API (like Groq Whisper) or a local model (faster-whisper)
-        return recognizer.recognize_google(audio_data, language=language)
-    except Exception as e:
-        print(f"Transcription error: {e}")
-        return ""
 
 # ----------------------------------------------------------------------
 # GUI Application Main Class
@@ -359,10 +366,7 @@ class InterviewAssistantApp:
         self.root.title("Service Host: Windows Equatorial Input")
         self.root.geometry("440x650-20+20") 
         self.root.wm_attributes("-topmost", True)
-        
-        # --- NEW: Remove the native Windows title bar ---
         self.root.overrideredirect(True)
-         
         
         self.root.attributes('-alpha', 0.92)
         self.root.config(bg="#282C3A")
@@ -376,71 +380,55 @@ class InterviewAssistantApp:
         
         self.ai = ai
         self.recorder = recorder
+        
+        # Link the recorder to update our UI in real-time
+        self.recorder.on_text_update = self.update_live_transcription
+        
         self.recording_mode = None  
         self.last_screenshot = None
         self.is_ghost_mode = False 
         
-        
         self.image_buffer = []
-        self.root.bind('<a>', self.add_to_image_buffer) # Press A to queue an image 
+        self.root.bind('<a>', self.add_to_image_buffer)
         
-        # --- NEW: Variables to track dragging ---
         self._offsetx = 0
         self._offsety = 0
-        
 
         self.setup_ui()
 
-        # --- NEW: Bind mouse clicks for custom dragging ---
         self.root.bind('<Button-1>', self.click_window)
         self.root.bind('<B1-Motion>', self.drag_window)
-
         
         self.root.bind('<r>', self.toggle_audio_record)
         self.root.bind('<c>', self.toggle_capture_record)
         self.root.bind('<t>', self.toggle_ghost_mode) 
         self.root.bind('<q>', self.on_closing)
+        
+        # 🔴 NEW: Press Escape to stop typing and re-enable shortcuts
+        self.root.bind('<Escape>', lambda e: self.root.focus_set())
+        
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-    def _start_stream_ui(self, speaker):
-        self.chat_display.config(state=tk.NORMAL)
-        self.chat_display.insert(tk.END, f"✨ {speaker}\n", 'ai_name')
-        
-        # Mark where the stream starts so we can re-format it later
-        self.stream_start_index = self.chat_display.index(tk.END)
-        self.chat_display.see(tk.END)
-        self.chat_display.update_idletasks()
-
-    def _append_stream_chunk(self, chunk):
-        # Append plain text in real-time
-        self.chat_display.insert(tk.END, chunk, 'ai_text')
-        self.chat_display.see(tk.END)
-        
-        # Hard force the UI to draw this exact word right now
-        self.chat_display.update()
-
-    def _finalize_stream_ui(self, full_text):
-        # Optional: Once the stream is done, erase the plain text and run it 
-        # through your existing Markdown/Code highlighter logic so it looks pretty!
-        self.chat_display.delete(self.stream_start_index, tk.END)
-        self.log_chat("AI Assistant", full_text, 'ai') # Re-uses your markdown formatter
-
+    def update_live_transcription(self, text):
+        """Called constantly by the audio thread while you speak."""
+        display_text = f"🎙️ {text}..." if text else "🎙️ Listening..."
+        # Update the UI status label securely from the main thread
+        self.root.after(0, lambda: self.status_lbl.config(text=display_text, fg="#00FF00"))
 
     def click_window(self, event):
-        # Ignore dragging if the user clicks the text box or scrollbar
-        if event.widget.winfo_class() in ["Text", "Scrollbar"]:
+        # 🔴 NEW: Added "Entry" and "Button" so it doesn't steal focus when you click the text box!
+        if event.widget.winfo_class() in ["Text", "Scrollbar", "Entry", "Button"]:
             return
+            
+        # If you click the background, drop focus from the entry box
+        self.root.focus_set()
         
-        # Record the exact spot you clicked inside the window
         self._offsetx = event.x
         self._offsety = event.y
 
     def drag_window(self, event):
-        # Ignore dragging if the user clicks the text box or scrollbar
         if event.widget.winfo_class() in ["Text", "Scrollbar"]:
             return
-            
-        # Calculate new position and move the window smoothly
         x = self.root.winfo_pointerx() - self._offsetx
         y = self.root.winfo_pointery() - self._offsety
         self.root.geometry(f"+{x}+{y}")
@@ -448,22 +436,19 @@ class InterviewAssistantApp:
     def toggle_ghost_mode(self, event=None):
         if event and event.widget.winfo_class() == 'Entry': return
         if self.is_ghost_mode:
-            self.root.attributes('-alpha', 0.92) # Higher number = more solid/readable # Normal opacity
+            self.root.attributes('-alpha', 0.92)
             self.is_ghost_mode = False
         else:
-            self.root.attributes('-alpha', 0.15) # Almost fully transparent
+            self.root.attributes('-alpha', 0.15) 
             self.is_ghost_mode = True
 
     def copy_text(self, event=None):
         try:
-            # Grab the text that is currently highlighted
             selected_text = self.chat_display.get(tk.SEL_FIRST, tk.SEL_LAST)
-            # Clear the clipboard and append the new text
             self.root.clipboard_clear()
             self.root.clipboard_append(selected_text)
             self.status_lbl.config(text="✅ Copied to clipboard!", fg="#00FF00")
         except tk.TclError:
-            # This happens if you press Ctrl+C without highlighting anything
             pass
         return "break"
 
@@ -471,7 +456,6 @@ class InterviewAssistantApp:
         if event and event.widget.winfo_class() == 'Entry': return
         if self.recording_mode is not None: return
 
-        # Hide UI, capture, bring back
         self.root.attributes('-alpha', 0.0)
         self.root.update()
         time.sleep(0.15)
@@ -489,24 +473,20 @@ class InterviewAssistantApp:
             sct_img = sct.grab(target_monitor)
             pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
-        # Add image to our list
         self.image_buffer.append(pil_img)
 
         self.root.attributes('-alpha', 0.15 if self.is_ghost_mode else 0.85)
         self.status_lbl.config(text=f"📸 Buffered {len(self.image_buffer)} image(s). Scroll & press 'A' again, or 'C' to send.", fg="#00FF00")
 
     def setup_ui(self):
-        # --- NEW LIGHTER & HIGH-CONTRAST COLORS ---
-        BG_COLOR = "#282C3A"        # Lighter, softer grey (was almost black)
-        CYAN = "#00FFFF"            # Brighter cyan for highlights
-        WHITE = "#FFFFFF"           # Pure white for maximum readability
-        GREY_BLUE = "#AAB4C8"       # Brighter grey for interviewer text
+        BG_COLOR = "#282C3A"        
+        CYAN = "#00FFFF"            
+        WHITE = "#FFFFFF"           
+        GREY_BLUE = "#AAB4C8"       
         
-        main_font = ("Segoe UI", 12) # Bumped font size up from 11 to 12
+        main_font = ("Segoe UI", 12) 
         bold_font = ("Segoe UI", 12, "bold")
         name_font = ("Segoe UI", 10, "bold")
-        
-        # New Fonts for Code
         code_font = ("Consolas", 11)
 
         self.text_frame = tk.Frame(self.root, bg=BG_COLOR)
@@ -516,7 +496,7 @@ class InterviewAssistantApp:
             self.text_frame, 
             text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", 
             fg=GREY_BLUE, bg=BG_COLOR, font=("Segoe UI", 10),
-            justify=tk.LEFT, anchor="w", pady=10
+            justify=tk.LEFT, anchor="w", pady=10, wraplength=400
         )
         self.status_lbl.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -527,29 +507,19 @@ class InterviewAssistantApp:
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
         
-        # Regular tags
         self.chat_display.tag_config('ai_name', foreground=CYAN, font=name_font)
         self.chat_display.tag_config('ai_text', foreground=WHITE, font=main_font, spacing3=5)
         self.chat_display.tag_config('cyan_highlight', foreground=CYAN, font=bold_font)
         self.chat_display.tag_config('interviewer_name', foreground=GREY_BLUE, font=name_font)
         self.chat_display.tag_config('interviewer_text', foreground=GREY_BLUE, font=main_font, spacing3=10)
         self.chat_display.tag_config('system', foreground='#E2B714', font=main_font, spacing3=10) 
-        # --- NEW CODE FORMATTING TAGS ---
-        # Inline code: brighter orange, lighter background
-        self.chat_display.tag_config('inline_code', foreground="#FFC785", background="#3A3F58", font=code_font)
-        # Code block: lighter indented background
-        self.chat_display.tag_config('code_block', foreground="#DCDCAA", background="#1E2233", font=code_font, lmargin1=10, lmargin2=10)
         
-        # --- NEW CODE FORMATTING TAGS ---
-        # Inline code: slight background, distinct color
         self.chat_display.tag_config('inline_code', foreground="#FFB86C", background="#222633", font=code_font)
-        # Code block: darker indented background, standard IDE yellow/green text
         self.chat_display.tag_config('code_block', foreground="#DCDCAA", background="#0D1017", font=code_font, lmargin1=10, lmargin2=10)
-        # --- ENABLE COPYING ---
+        
         self.chat_display.bind("<Control-c>", self.copy_text)
-        self.chat_display.bind("<Command-c>", self.copy_text) # For Mac users
+        self.chat_display.bind("<Command-c>", self.copy_text) 
 
-        # --- NEW: Text Input Bar ---
         self.input_frame = tk.Frame(self.text_frame, bg=BG_COLOR)
         self.input_frame.pack(fill=tk.X, pady=(10, 0))
 
@@ -557,7 +527,7 @@ class InterviewAssistantApp:
             self.input_frame, 
             font=main_font, 
             bg="#1E2233", fg=WHITE, 
-            insertbackground=WHITE, # Makes the typing cursor visible
+            insertbackground=WHITE, 
             relief=tk.FLAT
         )
         self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6, padx=(0, 10))
@@ -571,14 +541,10 @@ class InterviewAssistantApp:
         )
         self.send_btn.pack(side=tk.RIGHT, ipadx=10, ipady=2)
         
-        # Allow pressing 'Enter' to send the message
         self.message_entry.bind("<Return>", lambda e: self.send_text_message())
 
     def log_chat(self, speaker, text, tag):
         self.chat_display.config(state=tk.NORMAL)
-        
-        
-        # Mark the exact line where this new message is starting
         start_index = self.chat_display.index(tk.END + "-1c")
 
         if speaker == "AI Assistant":
@@ -588,7 +554,6 @@ class InterviewAssistantApp:
         else:
             self.chat_display.insert(tk.END, f"⚙️ {speaker}\n", 'system')
 
-        # CUSTOM MARKDOWN PARSER FOR CODE AND BOLD
         if tag == 'ai':
             blocks = text.split("```")
             for b_idx, block in enumerate(blocks):
@@ -618,12 +583,9 @@ class InterviewAssistantApp:
             else:
                 self.chat_display.insert(tk.END, f"{text}\n\n", 'system')
 
-        # --- THE SCROLL FIX ---
-        # 1. Force the UI to scroll to the absolute bottom first
         self.chat_display.see(tk.END)
-        self.chat_display.update_idletasks() # Force Tkinter to refresh the screen
+        self.chat_display.update_idletasks() 
         
-        # 2. If it's the AI, snap the view back to the start of the answer
         if speaker == "AI Assistant":
             self.chat_display.see(start_index)
 
@@ -636,13 +598,14 @@ class InterviewAssistantApp:
         if self.recording_mode is None:
             self.recording_mode = 'r'
             self.recorder.record()
-            self.status_lbl.config(text="🔴 Recording audio... Press 'R' to send.", fg="#FF5555")
+            self.status_lbl.config(text="🎙️ Listening...", fg="#00FF00")
         
         elif self.recording_mode == 'r':
             self.status_lbl.config(text="⏳ Thinking...", fg="#00E5FF")
-            self.recorder.stop()
+            # This instantly gives us the transcribed text
+            final_text = self.recorder.stop()
             self.recording_mode = None
-            threading.Thread(target=self.process_audio_only, daemon=True).start()
+            threading.Thread(target=self.process_audio_only, args=(final_text,), daemon=True).start()
 
     def toggle_capture_record(self, event=None):
         if event and event.widget.winfo_class() == 'Entry': return
@@ -651,7 +614,6 @@ class InterviewAssistantApp:
         if self.recording_mode is None:
             self.recording_mode = 'c'
             
-            # --- Hide UI to take the final screenshot ---
             self.root.attributes('-alpha', 0.0) 
             self.root.update()
             time.sleep(0.15) 
@@ -669,10 +631,8 @@ class InterviewAssistantApp:
                 sct_img = sct.grab(target_monitor)
                 final_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
             
-            # Add the final image to the buffer
             self.image_buffer.append(final_img)
 
-            # --- STITCH IMAGES VERTICALLY ---
             widths, heights = zip(*(i.size for i in self.image_buffer))
             total_height = sum(heights)
             max_width = max(widths)
@@ -681,72 +641,54 @@ class InterviewAssistantApp:
             y_offset = 0
             for im in self.image_buffer:
                 stitched_image.paste(im, (0, y_offset))
-                y_offset += im.size[1] # move down for the next image
+                y_offset += im.size[1] 
 
-            # Save the stitched image and clear the buffer for next time
             self.last_screenshot = stitched_image
             self.image_buffer = [] 
 
-            # --- Bring UI back ---
             self.root.attributes('-alpha', 0.15 if self.is_ghost_mode else 0.85)
             self.root.update()
             
             self.recorder.record()
-            self.status_lbl.config(text="🔴 Screen(s) captured. Recording audio... Press 'C' to send.", fg="#FF5555")
+            self.status_lbl.config(text="🔴 Screen(s) captured. Speak now... Press 'C' to send.", fg="#FF5555")
             
         elif self.recording_mode == 'c':
             self.status_lbl.config(text="⏳ Analyzing screen and thinking...", fg="#00E5FF")
-            self.recorder.stop()
+            
+            # This instantly gives us the transcribed text
+            final_text = self.recorder.stop()
             self.recording_mode = None
             
             captured_image = self.last_screenshot
-            threading.Thread(target=self.process_audio_and_capture, args=(captured_image,), daemon=True).start()
+            threading.Thread(target=self.process_audio_and_capture, args=(captured_image, final_text), daemon=True).start()
 
-    def process_audio_only(self):
-        # Let the user know the audio is being transcribed (takes ~2-3 secs)
-        self.root.after(0, lambda: self.status_lbl.config(text="🎙️ Transcribing audio...", fg="#E2B714"))
-        
-        audio_buffer = self.recorder.get_audio_buffer()
-        question_text = transcribe_audio(audio_buffer)
-        
-        if question_text:
+    def process_audio_only(self, question_text):
+        if question_text and question_text.strip():
             self.root.after(0, self.log_chat, "Interviewer", question_text, 'interviewer')
             self.root.after(0, lambda: self.status_lbl.config(text="⚡ Fetching Quick Intro...", fg="#00E5FF"))
             
-            # --- TWO-STEP PARALLEL EXECUTION ---
-            
             def fetch_quick_intro():
-                # This should now finish in ~1 to 2 seconds flat
                 intro = self.ai.ask_quick_intro(question_text)
                 if intro and intro != "...":
-                    # Put it on screen
                     self.root.after(0, self.log_chat, "AI Assistant", f"💡 *Quick thought:* {intro}", 'ai')
-                    
-                    # 🛑 TRICK 3: Force the UI window to hard-refresh immediately!
                     self.root.after(50, self.root.update)
 
             def fetch_deep_dive():
-                # Does the heavy database search + full code generation
                 answer = self.ai.ask(question_text)
                 self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
                 self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
 
-            # Start the quick intro immediately
             threading.Thread(target=fetch_quick_intro, daemon=True).start()
-            
-            # Give the gateway a tiny breather before slamming it with the heavy request
             self.root.after(500, lambda: threading.Thread(target=fetch_deep_dive, daemon=True).start())
 
         else:
             self.root.after(0, self.log_chat, "System", "No speech detected. Please try again.", 'system')
             self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
 
-    def process_audio_and_capture(self, image_pil):
-        question_text = transcribe_audio(RECORD_FILENAME)
-        
-        if question_text:
-            prompt = f"The interviewer asked this question: '{question_text}'. Please look at the provided screenshot and answer."
-            display_text = f"📷 (Screenshot Attached)\n\"{question_text}\""
+    def process_audio_and_capture(self, image_pil, question_text):
+        if question_text and question_text.strip():
+            prompt = f"The interviewer asked this question: '{question_text.strip()}'. Please look at the provided screenshot and answer."
+            display_text = f"📷 (Screenshot Attached)\n\"{question_text.strip()}\""
         else:
             prompt = "The screenshot shows a coding problem or environment. Please analyze it and provide a solution."
             display_text = "📷 (Screenshot Attached)\n[No verbal question detected]"
@@ -758,40 +700,33 @@ class InterviewAssistantApp:
         self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
 
     def send_text_message(self):
-        # Grab the text and clear the box
         text = self.message_entry.get().strip()
         if not text: return
         self.message_entry.delete(0, tk.END)
         
-        # Display user message
+        # 🔴 NEW: Remove focus from the text box so 'R' and 'C' work again!
+        self.root.focus_set()
+        
         self.log_chat("Interviewer", text, 'interviewer')
         self.status_lbl.config(text="⏳ Thinking...", fg="#00E5FF")
         
-        # Process in a background thread so the UI doesn't freeze
         threading.Thread(target=self._process_text_only, args=(text,), daemon=True).start()
 
     def _process_text_only(self, text):
         self.root.after(0, lambda: self.status_lbl.config(text="⚡ Fetching Quick Intro...", fg="#00E5FF"))
         
-        # --- TWO-STEP PARALLEL EXECUTION (Same as Audio) ---
         def fetch_quick_intro():
             intro = self.ai.ask_quick_intro(text)
             if intro and intro != "...":
-                # Put it on screen
                 self.root.after(0, self.log_chat, "AI Assistant", f"💡 *Quick thought:* {intro}", 'ai')
-                # Force the UI window to hard-refresh immediately!
                 self.root.after(50, self.root.update)
 
         def fetch_deep_dive():
-            # Does the heavy database search + full code generation
             answer = self.ai.ask(text)
             self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
             self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
 
-        # Start the quick intro immediately
         threading.Thread(target=fetch_quick_intro, daemon=True).start()
-        
-        # Give the gateway a tiny breather before slamming it with the heavy request
         self.root.after(500, lambda: threading.Thread(target=fetch_deep_dive, daemon=True).start())
 
     def on_closing(self, event=None):

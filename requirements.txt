@@ -6,3 +6,5 @@ SpeechRecognition
 pynput
 python-dotenv
 Pillow
+vosk
+sounddevice
