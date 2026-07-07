@@ -446,6 +446,7 @@ class InterviewAssistantApp:
         self.root.geometry(f"+{x}+{y}")
 
     def toggle_ghost_mode(self, event=None):
+        if event and event.widget.winfo_class() == 'Entry': return
         if self.is_ghost_mode:
             self.root.attributes('-alpha', 0.92) # Higher number = more solid/readable # Normal opacity
             self.is_ghost_mode = False
@@ -467,6 +468,7 @@ class InterviewAssistantApp:
         return "break"
 
     def add_to_image_buffer(self, event=None):
+        if event and event.widget.winfo_class() == 'Entry': return
         if self.recording_mode is not None: return
 
         # Hide UI, capture, bring back
@@ -547,6 +549,31 @@ class InterviewAssistantApp:
         self.chat_display.bind("<Control-c>", self.copy_text)
         self.chat_display.bind("<Command-c>", self.copy_text) # For Mac users
 
+        # --- NEW: Text Input Bar ---
+        self.input_frame = tk.Frame(self.text_frame, bg=BG_COLOR)
+        self.input_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.message_entry = tk.Entry(
+            self.input_frame, 
+            font=main_font, 
+            bg="#1E2233", fg=WHITE, 
+            insertbackground=WHITE, # Makes the typing cursor visible
+            relief=tk.FLAT
+        )
+        self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6, padx=(0, 10))
+        
+        self.send_btn = tk.Button(
+            self.input_frame, text="Send", 
+            bg=CYAN, fg="#000000", 
+            font=name_font,
+            relief=tk.FLAT,
+            command=self.send_text_message
+        )
+        self.send_btn.pack(side=tk.RIGHT, ipadx=10, ipady=2)
+        
+        # Allow pressing 'Enter' to send the message
+        self.message_entry.bind("<Return>", lambda e: self.send_text_message())
+
     def log_chat(self, speaker, text, tag):
         self.chat_display.config(state=tk.NORMAL)
         
@@ -603,6 +630,7 @@ class InterviewAssistantApp:
         self.chat_display.config(state=tk.DISABLED)
 
     def toggle_audio_record(self, event=None):
+        if event and event.widget.winfo_class() == 'Entry': return
         if self.recording_mode == 'c': return 
 
         if self.recording_mode is None:
@@ -617,6 +645,7 @@ class InterviewAssistantApp:
             threading.Thread(target=self.process_audio_only, daemon=True).start()
 
     def toggle_capture_record(self, event=None):
+        if event and event.widget.winfo_class() == 'Entry': return
         if self.recording_mode == 'r': return 
 
         if self.recording_mode is None:
@@ -728,7 +757,45 @@ class InterviewAssistantApp:
         
         self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
 
+    def send_text_message(self):
+        # Grab the text and clear the box
+        text = self.message_entry.get().strip()
+        if not text: return
+        self.message_entry.delete(0, tk.END)
+        
+        # Display user message
+        self.log_chat("Interviewer", text, 'interviewer')
+        self.status_lbl.config(text="⏳ Thinking...", fg="#00E5FF")
+        
+        # Process in a background thread so the UI doesn't freeze
+        threading.Thread(target=self._process_text_only, args=(text,), daemon=True).start()
+
+    def _process_text_only(self, text):
+        self.root.after(0, lambda: self.status_lbl.config(text="⚡ Fetching Quick Intro...", fg="#00E5FF"))
+        
+        # --- TWO-STEP PARALLEL EXECUTION (Same as Audio) ---
+        def fetch_quick_intro():
+            intro = self.ai.ask_quick_intro(text)
+            if intro and intro != "...":
+                # Put it on screen
+                self.root.after(0, self.log_chat, "AI Assistant", f"💡 *Quick thought:* {intro}", 'ai')
+                # Force the UI window to hard-refresh immediately!
+                self.root.after(50, self.root.update)
+
+        def fetch_deep_dive():
+            # Does the heavy database search + full code generation
+            answer = self.ai.ask(text)
+            self.root.after(0, self.log_chat, "AI Assistant", answer, 'ai')
+            self.root.after(0, lambda: self.status_lbl.config(text="Type message...\n(Press 'R' for Audio | 'C' for Screenshot)", fg="#8B949E"))
+
+        # Start the quick intro immediately
+        threading.Thread(target=fetch_quick_intro, daemon=True).start()
+        
+        # Give the gateway a tiny breather before slamming it with the heavy request
+        self.root.after(500, lambda: threading.Thread(target=fetch_deep_dive, daemon=True).start())
+
     def on_closing(self, event=None):
+        if event and event.widget.winfo_class() == 'Entry': return
         self.root.quit()
 
 # ----------------------------------------------------------------------
